@@ -1,0 +1,17 @@
+[package]
+name = "st25r3916-rfal"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+# Enable C compilation of RFAL. Disabled by default for library usage.
+# Enable this in your binary crate if you have the target C compiler installed.
+compile-c = []
+
+[dependencies]
+
+[build-dependencies]
+bindgen = "0.72.1"
+cc = "1.0"
+glob = "0.3.3"
