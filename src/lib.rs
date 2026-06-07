@@ -1,14 +1,7 @@
 #![no_std]
 extern crate alloc;
 
-use crate::rfal::{
-    RFAL_FEATURE_NFC_DEP_BLOCK_MAX_LEN, RFAL_NFC_POLL_TECH_A,
-    rfalBitRate_RFAL_BR_212, rfalBitRate_RFAL_BR_424, rfalBitRate_RFAL_BR_KEEP,
-    rfalComplianceMode_RFAL_COMPLIANCE_MODE_NFC,
-    rfalIsoDepFSxI_RFAL_ISODEP_FSXI_256,
-    rfalNfcDeactivate, rfalNfcDevice, rfalNfcDiscover, rfalNfcDiscoverParam,
-    rfalNfcGetActiveDevice, rfalNfcInitialize, rfalNfcWorker,
-};
+use crate::rfal::{RFAL_ESP32_DEFAULT_DEVICE_LIMIT, RFAL_ESP32_DEFAULT_DISCOVERY_DURATION_MS, RFAL_NFC_LISTEN_TECH_A, rfalComplianceMode_RFAL_COMPLIANCE_MODE_NFC, rfalDeinitialize, rfalFieldOnAndStartGT, rfalNfcDeactivate, rfalNfcDevice, rfalNfcDiscover, rfalNfcDiscoverParam, rfalNfcGetActiveDevice, rfalNfcInitialize, rfalNfcWorker, RFAL_NFC_LISTEN_TECH_B, RFAL_NFC_POLL_TECH_A};
 use core::ptr;
 
 mod lib_types;
@@ -38,27 +31,25 @@ impl NfcReader {
 
     /// Initialise the RFAL NFC module.  Must be called before any other operation.
     pub fn init(&mut self) -> Result<(), RfalError> {
-        rfal_result(unsafe { rfalNfcInitialize() })
+       // unsafe { rfalDeinitialize() };
+        let status = unsafe { rfalNfcInitialize() };
+       // unsafe { rfalFieldOnAndStartGT() }; // Don't do this, it will make discovery never find something
+        rfal_result(status)
     }
 
-    /// Configure discovery parameters and start listening for NFC-A tags.
+    /// Configure discovery parameters and start polling for NFC-A tags.
     ///
-    /// The RFAL NFC layer manages the RF field lifecycle internally via `rfalNfcWorker`.
-    /// Do not call lower-level field functions after this — let the worker drive everything.
+    /// Mirrors the minimal parameter set used in the working C reference example.
+    /// The RFAL NFC layer owns the RF field lifecycle; do not call lower-level
+    /// field functions after this.
     pub fn start_discovery(&mut self, notify_cb: Option<NfcCallback>) -> Result<(), RfalError> {
         unsafe {
             let mut disc_params: rfalNfcDiscoverParam = core::mem::zeroed();
             disc_params.compMode = rfalComplianceMode_RFAL_COMPLIANCE_MODE_NFC;
-            disc_params.devLimit = 1u8;
+            disc_params.devLimit = RFAL_ESP32_DEFAULT_DEVICE_LIMIT as u8;
             disc_params.techs2Find = RFAL_NFC_POLL_TECH_A as u16;
-            disc_params.totalDuration = 1000u16;
-            disc_params.maxBR = rfalBitRate_RFAL_BR_KEEP;
-            disc_params.nfcfBR = rfalBitRate_RFAL_BR_212;
-            disc_params.ap2pBR = rfalBitRate_RFAL_BR_424;
-            disc_params.isoDepFS = rfalIsoDepFSxI_RFAL_ISODEP_FSXI_256;
-            disc_params.nfcDepLR = RFAL_FEATURE_NFC_DEP_BLOCK_MAX_LEN as u8;
+            disc_params.totalDuration = RFAL_ESP32_DEFAULT_DISCOVERY_DURATION_MS as u16;
             disc_params.notifyCb = notify_cb;
-
             rfal_result(rfalNfcDiscover(&disc_params))
         }
     }

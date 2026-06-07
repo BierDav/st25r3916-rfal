@@ -10,6 +10,7 @@ default = []
 compile-c = []
 
 [dependencies]
+strum = { version = "0.26", features = ["derive"] }
 
 [build-dependencies]
 bindgen = "0.72.1"
