@@ -97,3 +97,17 @@ extern void st25r3916ledEvtWrMultiReg(uint8_t reg, const uint8_t* vals, uint8_t 
 extern void st25r3916ledEvtCmd(uint8_t cmd);
 
 #endif // RFAL_PLATFORM_H
+
+#ifndef RFAL_CONFIG_H
+#define RFAL_CONFIG_H
+
+/* ESP32-specific: defaults used by the SPI examples in this fork. */
+#ifndef RFAL_ESP32_DEFAULT_DISCOVERY_DURATION_MS
+#define RFAL_ESP32_DEFAULT_DISCOVERY_DURATION_MS 1000U
+#endif
+
+#ifndef RFAL_ESP32_DEFAULT_DEVICE_LIMIT
+#define RFAL_ESP32_DEFAULT_DEVICE_LIMIT 1U
+#endif
+
+#endif /* RFAL_CONFIG_H */
