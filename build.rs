@@ -9,6 +9,41 @@ fn main() {
     generate_bindings();
 }
 
+/// Returns the ST25R transceiver chip variant name defined by Cargo features.
+///
+/// Mutually exclusive features:
+/// - `st25r3916` -> defines `ST25R3916`
+/// - `st25r3916b` -> defines `ST25R3916B`
+///
+/// Returns one of the define strings, or panics if zero or more than one are active.
+fn get_chip_variant() -> &'static str {
+    let st25r3916 = cfg!(feature = "st25r3916");
+    let st25r3916b = cfg!(feature = "st25r3916b");
+    match (st25r3916, st25r3916b) {
+        (true, false) => "ST25R3916",
+        (false, true) => "ST25R3916B",
+        (false, false) => panic!(
+            "st25r3916-rfal error: Exactly one chip variant feature must be enabled. \
+             Neither 'st25r3916' nor 'st25r3916b' is enabled. \
+             Please enable either 'st25r3916' or 'st25r3916b' (or use default features)."
+        ),
+        (true, true) => {
+            println!("cargo:warning=st25r3916-rfal: Both 'st25r3916' and 'st25r3916b' features are enabled. Defaulting to ST25R3916B to prevent build failures during cargo sync/indexing.");
+            "ST25R3916B"
+        }
+    }
+}
+
+/// Compiles the RFAL C library.
+///
+/// # Note on compiler discovery:
+/// Non-upstream-LLVM targets (such as Xtensa-based ESP32 chips today) do not have
+/// built-in naming conventions in Cargo's `cc` crate. Consumers targeting these
+/// platforms must supply `CC_<target>` and `AR_<target>` environment variables (or
+/// equivalent `.cargo/config.toml` target entries) pointing to the custom GCC toolchain.
+/// If these variables are not set, `build.rs` will bubble up `cc`'s compilation error
+/// instead of silently using the host compiler. Upstream-LLVM targets (such as ARM
+/// thumbv* and RISC-V riscv32*) are resolved automatically by `cc` using default naming tables.
 fn compile_c() {
     let mut builder = cc::Build::new();
 
@@ -19,7 +54,8 @@ fn compile_c() {
         .include("src")
         .flag("-Wno-type-limits");
 
-    builder.define("ST25R3916B", None);
+    let variant = get_chip_variant();
+    builder.define(variant, None);
     builder.file("src/platform_log.c");
 
     let rfal_files = glob::glob("rfal/src/**/*.c").expect("Failed to read glob pattern");
@@ -40,7 +76,69 @@ fn compile_c() {
     builder.compile("rfal");
 }
 
+struct TargetBindgenConfig {
+    /// Explicit `clang -target=...` to pass. `None` means let bindgen infer
+    /// from the normal Rust target triple (correct for any target that is
+    /// upstream LLVM — which is most non-Xtensa embedded targets: ARM
+    /// Cortex-M `thumbv*`, RISC-V `riscv32*`, etc).
+    clang_target: Option<String>,
+    /// Extra `-I` directories needed only for this target's SDK/toolchain
+    /// headers. Empty for targets that don't need anything beyond the
+    /// crate's own include dirs.
+    extra_include_dirs: Vec<std::path::PathBuf>,
+}
+
+fn resolve_target_bindgen_config(target_triple: &str) -> TargetBindgenConfig {
+    if target_triple.contains("xtensa") {
+        xtensa_bindgen_config(target_triple)
+    } else {
+        // Upstream-LLVM targets (ARM, RISC-V, ...): no special handling
+        // needed in the common case. If a specific non-Xtensa target later
+        // needs SDK headers (e.g. an STM32 HAL), add a clearly-named match
+        // arm here — do NOT grow another inline `if` chain in
+        // generate_bindings() itself.
+        TargetBindgenConfig {
+            clang_target: None,
+            extra_include_dirs: vec![],
+        }
+    }
+}
+
+fn xtensa_bindgen_config(target_triple: &str) -> TargetBindgenConfig {
+    // Extract the chip name from target_triple (e.g. "xtensa-esp32s3-espidf" or "xtensa-esp32s2-elf" -> "esp32s3"/"esp32s2")
+    let mcu = if let Some(idx) = target_triple.find("xtensa-") {
+        let after_xtensa = &target_triple[idx + "xtensa-".len()..];
+        after_xtensa.split('-').next().unwrap_or("esp32s3")
+    } else {
+        "esp32s3"
+    };
+
+    let clang_target = format!("xtensa-{}-elf", mcu);
+    let mut extra_include_dirs = Vec::new();
+
+    if let Ok(esp_idf_path) = std::env::var("ESP_IDF_PATH") {
+        extra_include_dirs.push(std::path::PathBuf::from(format!(
+            "{}/components/newlib/platform_include",
+            esp_idf_path
+        )));
+    }
+
+    if let Some(include_dir) = find_xtensa_include_dir(target_triple) {
+        extra_include_dirs.push(include_dir);
+    } else {
+        println!(
+            "cargo:warning=Could not find Xtensa toolchain headers. Bindgen may fail if standard headers are missing."
+        );
+    }
+
+    TargetBindgenConfig {
+        clang_target: Some(clang_target),
+        extra_include_dirs,
+    }
+}
+
 fn generate_bindings() {
+    let variant = get_chip_variant();
     let mut builder = bindgen::Builder::default()
         .header("rfal/inc/rfal_nfc.h")
         .header("rfal/inc/rfal_rf.h")
@@ -51,30 +149,19 @@ fn generate_bindings() {
         .clang_arg("-D__BINDGEN__")
         .clang_arg("-D__attribute__(x)=")
         .clang_arg("-D__extension__=")
-        .clang_arg("-DST25R3916B")
+        .clang_arg(format!("-D{}", variant))
         .use_core()
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
 
-    if let Ok(esp_idf_path) = std::env::var("ESP_IDF_PATH") {
-        builder = builder.clang_arg(format!(
-            "-I{}/components/newlib/platform_include",
-            esp_idf_path
-        ));
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let target_config = resolve_target_bindgen_config(&target);
+
+    if let Some(ref clang_target) = target_config.clang_target {
+        builder = builder.clang_arg(format!("--target={}", clang_target));
     }
 
-    let target = std::env::var("TARGET").unwrap_or_default();
-    let is_xtensa = target.contains("xtensa");
-
-    if is_xtensa {
-        builder = builder.clang_arg("--target=xtensa-esp32s3-elf");
-
-        if let Some(include_dir) = find_xtensa_include_dir() {
-            builder = builder.clang_arg(format!("-I{}", include_dir.display()));
-        } else {
-            println!(
-                "cargo:warning=Could not find Xtensa toolchain headers. Bindgen may fail if standard headers are missing."
-            );
-        }
+    for dir in &target_config.extra_include_dirs {
+        builder = builder.clang_arg(format!("-I{}", dir.display()));
     }
 
     let bindings = builder.generate().expect("Unable to generate bindings");
@@ -398,11 +485,9 @@ fn make_variant_name(remaining: &str, fallback_prefix: &str) -> String {
     }
 }
 
-fn find_xtensa_include_dir() -> Option<std::path::PathBuf> {
-    let target = std::env::var("TARGET").unwrap_or_default();
-
+fn find_xtensa_include_dir(target_triple: &str) -> Option<std::path::PathBuf> {
     // 1. Try finding it from the active compiler in the environment
-    let target_cc_var = format!("CC_{}", target.replace('-', "_"));
+    let target_cc_var = format!("CC_{}", target_triple.replace('-', "_"));
     if let Ok(cc_val) = std::env::var(&target_cc_var).or_else(|_| std::env::var("CC")) {
         let cc_path = std::path::Path::new(&cc_val);
         if let Some(include_dir) = find_include_dir_from_compiler(cc_path) {

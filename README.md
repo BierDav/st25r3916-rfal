@@ -334,17 +334,48 @@ If you have the target compiler installed:
 st25r3916-rfal = { path = ".", features = ["compile-c"] }
 ```
 
-Or from command line:
+Or from the command line:
 ```bash
-cargo build --features st25r3916-rfal/compile-c
+cargo build --features compile-c
 ```
 
-Required toolchains for `compile-c` feature:
-- **ESP32-S3**: `xtensa-esp-elf-gcc` (install via `espup`)
-- **STM32**: `arm-none-eabi-gcc` (install via your package manager)
-- **Generic ARM**: `arm-gcc`
+### Compiler Discovery and Cross-Compilation
 
-If you enable `compile-c` without the compiler installed, the build will fail with a "tool not found" error. Simply remove the feature to use precompiled bindings instead.
+When the `compile-c` feature is enabled, Cargo uses the `cc` crate to build the RFAL C sources. The C compiler must be discoverable at build time.
+
+#### 1. Xtensa (ESP32-S3 / ESP32-S2 / ESP32)
+Because Xtensa targets are non-upstream custom targets, Cargo's `cc` crate has no built-in naming conventions to automatically locate their compilers. You **MUST** manually point Cargo to the custom GCC toolchain binaries using environment variables.
+
+Add the following to your project's `.cargo/config.toml`:
+
+```toml
+[env]
+CC_xtensa_esp32s3_espidf = { value = ".embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20251107/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc", relative = true }
+AR_xtensa_esp32s3_espidf = { value = ".embuild/espressif/tools/xtensa-esp-elf/esp-14.2.0_20251107/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ar", relative = true }
+```
+*(Adjust the target suffix like `esp32s3` to `esp32s2` or `esp32` and compile path version numbers to match your ESP-IDF installation).*
+
+#### 2. ARM Cortex-M (STM32, nRF52, etc.)
+Upstream-LLVM targets like ARM `thumbv7em-none-eabihf` are natively recognized by `cc-rs`. If you have the standard cross-compiler (e.g., `arm-none-eabi-gcc`) installed in your system `PATH`, compiler discovery works automatically with **zero extra config**.
+
+If the toolchain is in a non-standard location, you can supply it via `.cargo/config.toml`:
+
+```toml
+[env]
+CC_thumbv7em_none_eabihf = "/path/to/arm-none-eabi-gcc"
+AR_thumbv7em_none_eabihf = "/path/to/arm-none-eabi-ar"
+```
+
+#### 3. RISC-V (ESP32-C3 / ESP32-C6 / etc.)
+RISC-V targets (like `riscv32imac-unknown-none-elf`) are also natively recognized by `cc-rs`. If the RISC-V cross-compiler (`riscv32-unknown-elf-gcc` or `riscv-none-elf-gcc`) is in your system `PATH`, it works with **zero extra config**.
+
+If in a non-standard location, supply it via `.cargo/config.toml`:
+
+```toml
+[env]
+CC_riscv32imac_unknown_none_elf = "/path/to/riscv32-unknown-elf-gcc"
+AR_riscv32imac_unknown_none_elf = "/path/to/riscv32-unknown-elf-ar"
+```
 
 ## License
 
