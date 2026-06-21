@@ -1,7 +1,7 @@
 pub mod callbacks;
 pub mod builder;
 
-pub use builder::{AnySpi, NfcReaderBuilder};
+pub use builder::{NfcReaderBuilder};
 
 use crate::{WorkerDriver, WorkerHandle, RfalError};
 use alloc::sync::Arc;

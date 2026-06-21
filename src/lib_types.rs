@@ -272,5 +272,18 @@ impl core::fmt::Debug for RfalDiscoveryConfig {
     }
 }
 
+/// Developer-friendly configuration for ISO-DEP APDU transceive.
+#[derive(Builder, Debug, Clone)]
+#[builder(builder_type = RfalApduTransceiveConfigBuilder)]
+pub struct RfalApduTransceiveConfig {
+    pub fwt: u32,
+    pub dfwt: u32,
+    pub fsx: u16,
+    pub did: u8,
+    #[builder(default = 256)]
+    pub our_fsx: u16,
+}
+
+
 
 

@@ -47,7 +47,13 @@ fn get_chip_variant() -> &'static str {
 fn compile_c() {
     let mut builder = cc::Build::new();
 
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target.contains("xtensa") {
+        builder.flag("-mlongcalls");
+    }
+
     builder
+        .pic(false)
         .include("rfal/inc")
         .include("rfal/src")
         .include("rfal/src/st25r3916")
@@ -89,14 +95,9 @@ struct TargetBindgenConfig {
 }
 
 fn resolve_target_bindgen_config(target_triple: &str) -> TargetBindgenConfig {
-    if target_triple.contains("xtensa") {
-        xtensa_bindgen_config(target_triple)
+    if target_triple.contains("xtensa") || target_triple.contains("riscv32") {
+        esp_bindgen_config(target_triple)
     } else {
-        // Upstream-LLVM targets (ARM, RISC-V, ...): no special handling
-        // needed in the common case. If a specific non-Xtensa target later
-        // needs SDK headers (e.g. an STM32 HAL), add a clearly-named match
-        // arm here — do NOT grow another inline `if` chain in
-        // generate_bindings() itself.
         TargetBindgenConfig {
             clang_target: None,
             extra_include_dirs: vec![],
@@ -104,16 +105,31 @@ fn resolve_target_bindgen_config(target_triple: &str) -> TargetBindgenConfig {
     }
 }
 
-fn xtensa_bindgen_config(target_triple: &str) -> TargetBindgenConfig {
-    // Extract the chip name from target_triple (e.g. "xtensa-esp32s3-espidf" or "xtensa-esp32s2-elf" -> "esp32s3"/"esp32s2")
-    let mcu = if let Some(idx) = target_triple.find("xtensa-") {
-        let after_xtensa = &target_triple[idx + "xtensa-".len()..];
-        after_xtensa.split('-').next().unwrap_or("esp32s3")
+fn esp_bindgen_config(target_triple: &str) -> TargetBindgenConfig {
+    let (mcu, arch_prefix) = if target_triple.contains("xtensa") {
+        let mcu = if let Some(idx) = target_triple.find("xtensa-") {
+            let after_xtensa = &target_triple[idx + "xtensa-".len()..];
+            after_xtensa.split('-').next().unwrap_or("esp32s3")
+        } else {
+            "esp32s3"
+        };
+        (mcu, "xtensa")
     } else {
-        "esp32s3"
+        let mcu = if let Some(idx) = target_triple.find("riscv32imac-esp-") {
+            let after_riscv = &target_triple[idx + "riscv32imac-esp-".len()..];
+            after_riscv.split('-').next().unwrap_or("esp32c6")
+        } else {
+            "esp32c6"
+        };
+        (mcu, "riscv32")
     };
 
-    let clang_target = format!("xtensa-{}-elf", mcu);
+    let clang_target = if arch_prefix == "xtensa" {
+        format!("xtensa-{}-elf", mcu)
+    } else {
+        format!("riscv32-{}-elf", mcu)
+    };
+    
     let mut extra_include_dirs = Vec::new();
 
     if let Ok(esp_idf_path) = std::env::var("ESP_IDF_PATH") {
@@ -123,11 +139,11 @@ fn xtensa_bindgen_config(target_triple: &str) -> TargetBindgenConfig {
         )));
     }
 
-    if let Some(include_dir) = find_xtensa_include_dir(target_triple) {
+    if let Some(include_dir) = find_esp_include_dir(target_triple) {
         extra_include_dirs.push(include_dir);
     } else {
         println!(
-            "cargo:warning=Could not find Xtensa toolchain headers. Bindgen may fail if standard headers are missing."
+            "cargo:warning=Could not find ESP toolchain headers. Bindgen may fail if standard headers are missing."
         );
     }
 
@@ -485,7 +501,7 @@ fn make_variant_name(remaining: &str, fallback_prefix: &str) -> String {
     }
 }
 
-fn find_xtensa_include_dir(target_triple: &str) -> Option<std::path::PathBuf> {
+fn find_esp_include_dir(target_triple: &str) -> Option<std::path::PathBuf> {
     // 1. Try finding it from the active compiler in the environment
     let target_cc_var = format!("CC_{}", target_triple.replace('-', "_"));
     if let Ok(cc_val) = std::env::var(&target_cc_var).or_else(|_| std::env::var("CC")) {
@@ -499,19 +515,26 @@ fn find_xtensa_include_dir(target_triple: &str) -> Option<std::path::PathBuf> {
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let mut current = std::path::PathBuf::from(manifest_dir);
         loop {
-            // Search in .embuild
-            let embuild_pattern = current.join(
-                ".embuild/espressif/tools/xtensa-esp-elf/*/xtensa-esp-elf/xtensa-esp-elf/include",
-            );
-            if let Some(path) = glob_first(&embuild_pattern.to_string_lossy()) {
-                return Some(path);
+            // Search in .embuild for both xtensa and riscv32
+            for arch in &["xtensa-esp-elf", "riscv32-esp-elf"] {
+                let embuild_pattern = current.join(format!(
+                    ".embuild/espressif/tools/{}/*/{}/{}/include",
+                    arch, arch, arch
+                ));
+                if let Some(path) = glob_first(&embuild_pattern.to_string_lossy()) {
+                    return Some(path);
+                }
             }
 
             // Search in .espressif
-            let espressif_pattern = current
-                .join(".espressif/tools/xtensa-esp-elf/*/xtensa-esp-elf/xtensa-esp-elf/include");
-            if let Some(path) = glob_first(&espressif_pattern.to_string_lossy()) {
-                return Some(path);
+            for arch in &["xtensa-esp-elf", "riscv32-esp-elf"] {
+                let espressif_pattern = current.join(format!(
+                    ".espressif/tools/{}/*/{}/{}/include",
+                    arch, arch, arch
+                ));
+                if let Some(path) = glob_first(&espressif_pattern.to_string_lossy()) {
+                    return Some(path);
+                }
             }
 
             if !current.pop() {
@@ -523,20 +546,22 @@ fn find_xtensa_include_dir(target_triple: &str) -> Option<std::path::PathBuf> {
     // 3. Fallback to user home directory
     let home = std::env::var("HOME").unwrap_or_default();
 
-    let home_espressif_pattern = format!(
-        "{}/.espressif/tools/xtensa-esp-elf/*/xtensa-esp-elf/xtensa-esp-elf/include",
-        home
-    );
-    if let Some(path) = glob_first(&home_espressif_pattern) {
-        return Some(path);
-    }
+    for arch in &["xtensa-esp-elf", "riscv32-esp-elf"] {
+        let home_espressif_pattern = format!(
+            "{}/.espressif/tools/{}/*/{}/{}/include",
+            home, arch, arch, arch
+        );
+        if let Some(path) = glob_first(&home_espressif_pattern) {
+            return Some(path);
+        }
 
-    let home_embuild_pattern = format!(
-        "{}/.embuild/espressif/tools/xtensa-esp-elf/*/xtensa-esp-elf/xtensa-esp-elf/include",
-        home
-    );
-    if let Some(path) = glob_first(&home_embuild_pattern) {
-        return Some(path);
+        let home_embuild_pattern = format!(
+            "{}/.embuild/espressif/tools/{}/*/{}/{}/include",
+            home, arch, arch, arch
+        );
+        if let Some(path) = glob_first(&home_embuild_pattern) {
+            return Some(path);
+        }
     }
 
     None
@@ -544,15 +569,24 @@ fn find_xtensa_include_dir(target_triple: &str) -> Option<std::path::PathBuf> {
 
 fn find_include_dir_from_compiler(cc_path: &std::path::Path) -> Option<std::path::PathBuf> {
     let parent = cc_path.parent()?; // bin/
-    let toolchain_root = parent.parent()?; // xtensa-esp-elf/
+    let toolchain_root = parent.parent()?; // xtensa-esp-elf/ or riscv32-esp-elf/
 
-    // Check for standard layout: xtensa-esp-elf/xtensa-esp-elf/include
-    let candidate = toolchain_root.join("xtensa-esp-elf").join("include");
-    if candidate.exists() {
-        return Some(candidate);
+    // Check for standard layout: toolchain_root/target/include
+    if let Ok(entries) = std::fs::read_dir(toolchain_root) {
+        for entry in entries {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                if path.is_dir() {
+                    let candidate = path.join("include");
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
     }
 
-    // Check for flat layout: xtensa-esp-elf/include
+    // Check for flat layout: toolchain_root/include
     let candidate = toolchain_root.join("include");
     if candidate.exists() {
         return Some(candidate);

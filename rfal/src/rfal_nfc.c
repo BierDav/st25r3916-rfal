@@ -433,6 +433,13 @@ void rfalNfcWorker( void )
             {
                 if( ( err != RFAL_ERR_NONE) || (gNfcDev.techsFound == RFAL_NFC_TECH_NONE) )/* Check if any error occurred or no techs were found   */
                 {
+                    if( gNfcDev.lmMask == 0U )
+                    {
+                        /* Pure reader/poller mode: keep RF carrier continuously on */
+                        gNfcDev.state = RFAL_NFC_STATE_LISTEN_TECHDETECT;
+                        break;
+                    }
+
                     rfalFieldOff();
                     gNfcDev.isFieldOn = false;
                     gNfcDev.state     = RFAL_NFC_STATE_LISTEN_TECHDETECT;             /* Nothing found as poller, go to listener */
@@ -458,41 +465,21 @@ void rfalNfcWorker( void )
                     break;                                                            /* Unable to retrieve any device, restart loop          */
                 }
                 
-                /* Check if more than one device has been found */
-                if( gNfcDev.devCnt > 1U )
-                {
-                    /* If more than one device was found inform upper layer to choose which one to activate */
-                    if( gNfcDev.disc.notifyCb != NULL )
-                    {
-                        gNfcDev.state = RFAL_NFC_STATE_POLL_SELECT;
-                        gNfcDev.disc.notifyCb( gNfcDev.state );
-                        break;
-                    }
-                }
-                
-                /* If only one device or no callback has been set, activate the first device found */
+                /* Always activate the first device found */
                 gNfcDev.selDevIdx = 0U;
                 gNfcDev.state = RFAL_NFC_STATE_POLL_ACTIVATION;
             }
             break;
-        
-            
+
+
         /*******************************************************************************/
         case RFAL_NFC_STATE_POLL_ACTIVATION:
-            
+
             err = rfalNfcPollActivation( gNfcDev.selDevIdx );
             if( err != RFAL_ERR_BUSY )                                                     /* Wait until all Activation is complete */
             {
                 if( err != RFAL_ERR_NONE )                                                 /* Check if activation has failed        */
                 {
-                    /* Check if more than one device has been found */
-                    if( (gNfcDev.devCnt > 1U) && (gNfcDev.disc.notifyCb != NULL) )
-                    {
-                        gNfcDev.state = RFAL_NFC_STATE_POLL_SELECT;
-                        rfalNfcNfcNotify( gNfcDev.state );
-                        break;
-                    }
-                    
                     gNfcDev.deactType = RFAL_NFC_DEACTIVATE_DISCOVERY;                /* Ensure deactivation, not Sleep        */
                     gNfcDev.state     = RFAL_NFC_STATE_DEACTIVATION;                  /* If Activation failed, restart loop    */
                     break;
@@ -543,18 +530,20 @@ void rfalNfcWorker( void )
         
         /*******************************************************************************/
         case RFAL_NFC_STATE_LISTEN_TECHDETECT:
-            
+
             if( platformTimerIsExpired( gNfcDev.discTmr ) )
             {
-                #if RFAL_FEATURE_LISTEN_MODE
-                    rfalListenStop();
-                #else
-                    rfalFieldOff();
-                #endif /* RFAL_FEATURE_LISTEN_MODE */
-                gNfcDev.isFieldOn = false;
-                
+                if( gNfcDev.lmMask != 0U )
+                {
+                    #if RFAL_FEATURE_LISTEN_MODE
+                        rfalListenStop();
+                    #else
+                        rfalFieldOff();
+                    #endif /* RFAL_FEATURE_LISTEN_MODE */
+                    gNfcDev.isFieldOn = false;
+                }
+
                 gNfcDev.state = RFAL_NFC_STATE_START_DISCOVERY;                       /* Restart the discovery loop */
-                rfalNfcNfcNotify( gNfcDev.state );                                    /* Notify caller             */
                 break;
             }
 
@@ -938,7 +927,11 @@ static ReturnCode rfalNfcPollTechDetection( void )
         if( !gNfcDev.isTechInit )
         {
             RFAL_EXIT_ON_ERR( err, rfalNfcaPollerInitialize() );                       /* Initialize RFAL for NFC-A */
-            RFAL_EXIT_ON_ERR( err, rfalFieldOnAndStartGT() );                          /* As field is already On only starts GT timer */
+            if( !gNfcDev.isFieldOn )
+            {
+                RFAL_EXIT_ON_ERR( err, rfalFieldOnAndStartGT() );                      /* Turns Field On and starts GT timer */
+                gNfcDev.isFieldOn = true;
+            }
             gNfcDev.isTechInit    = true;
             gNfcDev.isOperOngoing = false;                                             /* No operation currently ongoing  */
         }
@@ -960,7 +953,25 @@ static ReturnCode rfalNfcPollTechDetection( void )
                 {
                     gNfcDev.techsFound |= RFAL_NFC_POLL_TECH_A;
                 }
-                
+                else
+                {
+                    /* Apple Enhanced Contactless Polling (ECP v1) */
+                    /* Emits VAS Only polling frame so iPhones in proximity */
+                    /* activate Apple Wallet and display the pass */
+                    uint8_t rx_data[1];
+                    uint16_t rx_len = 0;
+                    static const uint8_t ecp_frame[7] = {0x6a, 0x01, 0x00, 0x00, 0x02, 0xe4, 0xd2};
+                    rfalTransceiveBlockingTxRx(
+                        (uint8_t*)ecp_frame,
+                        7,
+                        rx_data,
+                        0,
+                        &rx_len,
+                        RFAL_TXRX_FLAGS_DEFAULT | RFAL_TXRX_FLAGS_CRC_TX_MANUAL,
+                        6780
+                    );
+                }
+
                 gNfcDev.isTechInit = false;
                 gNfcDev.techs2do  &= ~RFAL_NFC_POLL_TECH_A;
             }

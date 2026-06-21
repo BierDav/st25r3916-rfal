@@ -55,6 +55,10 @@ pub struct NfcReader {
     worker_handle: Option<Box<dyn WorkerHandle>>,
     worker_running: Option<Arc<AtomicBool>>,
     _marker: core::marker::PhantomData<*mut ()>,
+    tx_buf: Box<rfal::rfalIsoDepApduBufFormat>,
+    rx_buf: Box<rfal::rfalIsoDepApduBufFormat>,
+    tmp_buf: Box<rfal::rfalIsoDepBufFormat>,
+    rx_len: Box<u16>,
 }
 
 impl NfcReader {
@@ -65,6 +69,10 @@ impl NfcReader {
             worker_handle: None,
             worker_running: None,
             _marker: core::marker::PhantomData,
+            tx_buf: Box::new(unsafe { core::mem::zeroed() }),
+            rx_buf: Box::new(unsafe { core::mem::zeroed() }),
+            tmp_buf: Box::new(unsafe { core::mem::zeroed() }),
+            rx_len: Box::new(0),
         }
     }
 
@@ -228,6 +236,48 @@ impl NfcReader {
         unsafe { rfalNfcWorker() }
     }
 
+    /// Safe developer-friendly wrapper to start an ISO-DEP APDU exchange.
+    pub fn start_apdu_transceive(
+        &mut self,
+        apdu: &[u8],
+        config: RfalApduTransceiveConfig,
+    ) -> Result<(), RfalError> {
+        if apdu.len() > self.tx_buf.apdu.len() {
+            return Err(RfalError::Param);
+        }
+        self.tx_buf.apdu[..apdu.len()].copy_from_slice(apdu);
+        *self.rx_len = 0;
+
+        let param = rfal::rfalIsoDepApduTxRxParam {
+            txBuf: &mut *self.tx_buf as *mut _,
+            txBufLen: apdu.len() as u16,
+            rxBuf: &mut *self.rx_buf as *mut _,
+            rxLen: &mut *self.rx_len as *mut _,
+            tmpBuf: &mut *self.tmp_buf as *mut _,
+            FWT: config.fwt,
+            dFWT: config.dfwt,
+            FSx: config.fsx,
+            ourFSx: config.our_fsx,
+            DID: config.did,
+        };
+
+        rfal_result(unsafe { rfal::rfalIsoDepStartApduTransceive(param) })
+    }
+
+    /// Safe developer-friendly wrapper to check the status of the ongoing APDU transceive.
+    pub fn get_apdu_transceive_status(&self) -> Result<(), RfalError> {
+        let status = unsafe { rfal::rfalIsoDepGetApduTransceiveStatus() };
+        rfal_result(status)
+    }
+
+    /// Safe developer-friendly wrapper to get the result of the completed APDU transceive.
+    pub fn get_apdu_transceive_result(&self) -> Result<alloc::vec::Vec<u8>, RfalError> {
+        let len = *self.rx_len as usize;
+        if len > self.rx_buf.apdu.len() {
+            return Err(RfalError::Internal);
+        }
+        Ok(self.rx_buf.apdu[..len].to_vec())
+    }
 }
 
 impl Drop for NfcReader {
