@@ -1,7 +1,7 @@
 #![no_std]
 extern crate alloc;
 
-use crate::rfal::{RFAL_ESP32_DEFAULT_DEVICE_LIMIT, RFAL_ESP32_DEFAULT_DISCOVERY_DURATION_MS, RFAL_NFC_LISTEN_TECH_A, rfalComplianceMode_RFAL_COMPLIANCE_MODE_NFC, rfalDeinitialize, rfalFieldOnAndStartGT, rfalNfcDeactivate, rfalNfcDevice, rfalNfcDiscover, rfalNfcDiscoverParam, rfalNfcGetActiveDevice, rfalNfcInitialize, rfalNfcWorker, RFAL_NFC_LISTEN_TECH_B, RFAL_NFC_POLL_TECH_A};
+use crate::rfal::{RFAL_ESP32_DEFAULT_DEVICE_LIMIT, RFAL_ESP32_DEFAULT_DISCOVERY_DURATION_MS, RFAL_NFC_LISTEN_TECH_A, rfalComplianceMode_RFAL_COMPLIANCE_MODE_ISO, rfalDeinitialize, rfalFieldOnAndStartGT, rfalNfcDeactivate, rfalNfcDevice, rfalNfcDiscover, rfalNfcDiscoverParam, rfalNfcGetActiveDevice, rfalNfcInitialize, rfalNfcWorker, RFAL_NFC_LISTEN_TECH_B, RFAL_NFC_POLL_TECH_A};
 use core::ptr;
 
 mod lib_types;
@@ -45,10 +45,10 @@ impl NfcReader {
     pub fn start_discovery(&mut self, notify_cb: Option<NfcCallback>) -> Result<(), RfalError> {
         unsafe {
             let mut disc_params: rfalNfcDiscoverParam = core::mem::zeroed();
-            disc_params.compMode = rfalComplianceMode_RFAL_COMPLIANCE_MODE_NFC;
+            disc_params.compMode = rfalComplianceMode_RFAL_COMPLIANCE_MODE_ISO;
             disc_params.devLimit = RFAL_ESP32_DEFAULT_DEVICE_LIMIT as u8;
             disc_params.techs2Find = RFAL_NFC_POLL_TECH_A as u16;
-            disc_params.totalDuration = RFAL_ESP32_DEFAULT_DISCOVERY_DURATION_MS as u16;
+            disc_params.totalDuration = 20 as u16;
             disc_params.notifyCb = notify_cb;
             rfal_result(rfalNfcDiscover(&disc_params))
         }
