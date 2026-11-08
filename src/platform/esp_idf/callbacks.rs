@@ -1,6 +1,7 @@
-use core::ffi::CStr;
+//! ESP-IDF implementation of the RFAL platform hooks (see the crate docs for
+//! the contract). All hooks share one recursive FreeRTOS mutex.
+
 use std::collections::HashMap;
-use std::os::raw::c_char;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -23,9 +24,7 @@ pub(crate) struct Globals {
 pub(crate) static GLOBALS: OnceLock<Mutex<Option<Globals>>> = OnceLock::new();
 pub(crate) static NEXT_TIMER_HANDLE: AtomicU32 = AtomicU32::new(1);
 
-use esp_idf_sys::{
-    xQueueCreateMutex, xQueueGiveMutexRecursive, xQueueTakeMutexRecursive,
-};
+use esp_idf_sys::{xQueueCreateMutex, xQueueGiveMutexRecursive, xQueueTakeMutexRecursive};
 
 struct FreeRtosMutex(esp_idf_sys::QueueHandle_t);
 unsafe impl Send for FreeRtosMutex {}
@@ -34,11 +33,13 @@ unsafe impl Sync for FreeRtosMutex {}
 static RFAL_MUTEX: OnceLock<FreeRtosMutex> = OnceLock::new();
 
 fn get_mutex() -> esp_idf_sys::QueueHandle_t {
-    RFAL_MUTEX.get_or_init(|| unsafe {
-        let handle = xQueueCreateMutex(1); // 1 is recursive mutex
-        assert!(!handle.is_null(), "Failed to create recursive mutex");
-        FreeRtosMutex(handle)
-    }).0
+    RFAL_MUTEX
+        .get_or_init(|| unsafe {
+            let handle = xQueueCreateMutex(1); // 1 is recursive mutex
+            assert!(!handle.is_null(), "Failed to create recursive mutex");
+            FreeRtosMutex(handle)
+        })
+        .0
 }
 
 pub(crate) fn get_globals() -> &'static Mutex<Option<Globals>> {
@@ -63,41 +64,48 @@ pub extern "C" fn platformSpiDeselect() {
     }
 }
 
+/// `void platformSpiTxRx(const uint8_t *tx, uint8_t *rx, uint16_t len)`.
+/// RFAL passes the same buffer as `tx` and `rx` for reads, and `rx == NULL`
+/// for writes.
 #[no_mangle]
-pub extern "C" fn platformSpiTxRx(tx_buf: *const u8, rx_buf: *mut u8, len: u16) -> i32 {
+pub unsafe extern "C" fn platformSpiTxRx(tx_buf: *const u8, rx_buf: *mut u8, len: u16) {
     let len = len as usize;
     if len == 0 {
-        return -1;
+        return;
     }
 
     let mut guard = get_globals().lock().unwrap();
-    let g = match &mut *guard {
-        Some(g) => g,
-        None => return -1,
+    let Some(g) = guard.as_mut() else {
+        return;
     };
 
-    let tx_slice: Option<&[u8]> = if tx_buf.is_null() {
-        None
+    // SAFETY (all arms): RFAL guarantees the buffers are valid for `len`
+    // bytes; aliasing tx/rx is handled with an in-place transfer so we never
+    // create overlapping `&[u8]`/`&mut [u8]`.
+    let res = if !rx_buf.is_null() && core::ptr::eq(tx_buf, rx_buf) {
+        let buf = unsafe { std::slice::from_raw_parts_mut(rx_buf, len) };
+        g.spi.transaction(&mut [Operation::TransferInPlace(buf)])
     } else {
-        Some(unsafe { std::slice::from_raw_parts(tx_buf, len) })
+        match (tx_buf.is_null(), rx_buf.is_null()) {
+            (false, false) => {
+                let tx = unsafe { std::slice::from_raw_parts(tx_buf, len) };
+                let rx = unsafe { std::slice::from_raw_parts_mut(rx_buf, len) };
+                g.spi.transaction(&mut [Operation::Transfer(rx, tx)])
+            }
+            (false, true) => {
+                let tx = unsafe { std::slice::from_raw_parts(tx_buf, len) };
+                g.spi.transaction(&mut [Operation::Write(tx)])
+            }
+            (true, false) => {
+                let rx = unsafe { std::slice::from_raw_parts_mut(rx_buf, len) };
+                g.spi.transaction(&mut [Operation::Read(rx)])
+            }
+            (true, true) => return,
+        }
     };
 
-    let mut rx_slice_mut: Option<&mut [u8]> = if rx_buf.is_null() {
-        None
-    } else {
-        Some(unsafe { std::slice::from_raw_parts_mut(rx_buf, len) })
-    };
-
-    let res = match (&tx_slice, &mut rx_slice_mut) {
-        (Some(tx), Some(rx)) => g.spi.transaction(&mut [Operation::Transfer(*rx, *tx)]),
-        (Some(tx), None) => g.spi.transaction(&mut [Operation::Write(*tx)]),
-        (None, Some(rx)) => g.spi.transaction(&mut [Operation::Read(*rx)]),
-        _ => return -1,
-    };
-
-    match res {
-        Ok(()) => 0,
-        Err(_) => -1,
+    if res.is_err() {
+        log::error!("st25r3916-rfal: SPI transfer failed");
     }
 }
 
@@ -113,7 +121,8 @@ pub extern "C" fn platformTimerCreate(ms: u32) -> u32 {
     let handle = NEXT_TIMER_HANDLE.fetch_add(1, Ordering::SeqCst);
     let mut guard = get_globals().lock().unwrap();
     if let Some(ref mut g) = *guard {
-        g.timers.insert(handle, Instant::now() + Duration::from_millis(ms as u64));
+        g.timers
+            .insert(handle, Instant::now() + Duration::from_millis(ms as u64));
     }
     handle
 }
@@ -128,17 +137,9 @@ pub extern "C" fn platformTimerIsExpired(handle: u32) -> bool {
             false
         }
     };
-    
+
     if triggered {
-        if let Some(cb_lock) = IRQ_CALLBACK.get() {
-            if let Ok(guard) = cb_lock.lock() {
-                if let Some(cb_fn) = *guard {
-                    unsafe {
-                        cb_fn();
-                    }
-                }
-            }
-        }
+        run_irq_callback();
     }
 
     let mut guard = get_globals().lock().unwrap();
@@ -159,11 +160,6 @@ pub extern "C" fn platformTimerDestroy(handle: u32) {
 }
 
 #[no_mangle]
-pub extern "C" fn platformGetSysTick() -> u32 {
-    unsafe { esp_idf_sys::xTaskGetTickCount() * (1000 / esp_idf_sys::configTICK_RATE_HZ) }
-}
-
-#[no_mangle]
 pub extern "C" fn platformTimerGetRemaining(handle: u32) -> u32 {
     let mut guard = get_globals().lock().unwrap();
     if let Some(ref mut g) = *guard {
@@ -181,8 +177,21 @@ pub extern "C" fn platformTimerGetRemaining(handle: u32) -> u32 {
 
 // ------------------------- GPIO helpers ------------------------------------
 
-#[no_mangle]
-pub extern "C" fn platformIrqIsHigh() -> bool {
+/// Run the ISR registered by RFAL (`st25r3916Isr`). The function pointer is
+/// copied out first so `IRQ_CALLBACK` is not held while the ISR runs: the ISR
+/// takes the RFAL mutex, and holding both in opposite orders on different
+/// threads would deadlock.
+fn run_irq_callback() {
+    let cb = IRQ_CALLBACK
+        .get()
+        .and_then(|lock| lock.lock().ok().and_then(|guard| *guard));
+    if let Some(cb_fn) = cb {
+        // SAFETY: RFAL registered this ISR for exactly this purpose.
+        unsafe { cb_fn() };
+    }
+}
+
+fn irq_is_high() -> bool {
     let mut guard = get_globals().lock().unwrap();
     if let Some(ref mut g) = *guard {
         g.irq.is_high()
@@ -193,15 +202,13 @@ pub extern "C" fn platformIrqIsHigh() -> bool {
 
 // ------------------------- Critical sections -------------------------------
 
-#[no_mangle]
-pub extern "C" fn platformProtect() {
+fn protect() {
     unsafe {
-        xQueueTakeMutexRecursive(get_mutex(), -1 as _);
+        xQueueTakeMutexRecursive(get_mutex(), u32::MAX as _);
     }
 }
 
-#[no_mangle]
-pub extern "C" fn platformUnprotect() {
+fn unprotect() {
     unsafe {
         xQueueGiveMutexRecursive(get_mutex());
     }
@@ -209,32 +216,32 @@ pub extern "C" fn platformUnprotect() {
 
 #[no_mangle]
 pub extern "C" fn platformProtectWorker() {
-    platformProtect();
+    protect();
 }
 
 #[no_mangle]
 pub extern "C" fn platformUnprotectWorker() {
-    platformUnprotect();
+    unprotect();
 }
 
 #[no_mangle]
 pub extern "C" fn platformProtectST25RComm() {
-    platformProtect();
+    protect();
 }
 
 #[no_mangle]
 pub extern "C" fn platformUnprotectST25RComm() {
-    platformUnprotect();
+    unprotect();
 }
 
 #[no_mangle]
 pub extern "C" fn platformProtectST25RIrqStatus() {
-    platformProtect();
+    protect();
 }
 
 #[no_mangle]
 pub extern "C" fn platformUnprotectST25RIrqStatus() {
-    platformUnprotect();
+    unprotect();
 }
 
 #[no_mangle]
@@ -244,7 +251,7 @@ pub extern "C" fn platformErrorHandle() {
 
 #[no_mangle]
 pub extern "C" fn platformGpioIsHigh(_port: u32, _pin: u32) -> bool {
-    platformIrqIsHigh()
+    irq_is_high()
 }
 
 #[no_mangle]
@@ -260,60 +267,26 @@ pub extern "C" fn platformIrqST25RPinInitialize() {
         return; // Already running
     }
 
-    std::thread::spawn(|| {
-        loop {
-            let triggered = platformIrqIsHigh();
+    std::thread::spawn(|| loop {
+        let triggered = irq_is_high();
 
-            if triggered {
-                if let Some(cb_lock) = IRQ_CALLBACK.get() {
-                    if let Ok(guard) = cb_lock.lock() {
-                        if let Some(cb_fn) = *guard {
-                            unsafe {
-                                cb_fn();
-                            }
-                        }
-                    }
-                }
+        if triggered {
+            run_irq_callback();
 
-                while platformIrqIsHigh() {
-                    FreeRtos::delay_ms(1);
-                }
+            while irq_is_high() {
+                FreeRtos::delay_ms(1);
             }
+        }
 
-            let interval = if let Some(globals_mutex) = GLOBALS.get() {
-                if let Ok(g) = globals_mutex.lock() {
-                    g.as_ref().map(|g| g.irq_poll_interval_ms).unwrap_or(1)
-                } else {
-                    1
-                }
+        let interval = if let Some(globals_mutex) = GLOBALS.get() {
+            if let Ok(g) = globals_mutex.lock() {
+                g.as_ref().map(|g| g.irq_poll_interval_ms).unwrap_or(1)
             } else {
                 1
-            };
-            FreeRtos::delay_ms(interval);
-        }
+            }
+        } else {
+            1
+        };
+        FreeRtos::delay_ms(interval);
     });
-}
-
-// LEDs - No-op
-#[no_mangle]
-pub extern "C" fn st25r3916ledInit() {}
-
-#[no_mangle]
-pub extern "C" fn st25r3916ledEvtIrq(_irq: u32) {}
-
-#[no_mangle]
-pub extern "C" fn st25r3916ledEvtWrMultiReg(_reg: u8, _vals: *const u8, _len: u8) {}
-
-#[no_mangle]
-pub extern "C" fn st25r3916ledEvtCmd(_cmd: u8) {}
-
-// Logging
-#[no_mangle]
-pub unsafe extern "C" fn rust_log_string(s: *const c_char) {
-    if s.is_null() {
-        return;
-    }
-    if let Ok(msg) = CStr::from_ptr(s).to_str() {
-        log::info!("RFAL: {}", msg.trim());
-    }
 }

@@ -1,425 +1,548 @@
-fn main() {
-    println!("cargo:rerun-if-changed=rfal/");
-    println!("cargo:rerun-if-changed=src/rfal_platform.h");
+//! Build script: compiles ST's RFAL C library and generates Rust bindings.
+//!
+//! Environment variables understood (besides the usual `CC_<target>`,
+//! `CFLAGS_<target>`, `AR_<target>` handled by the `cc` crate and
+//! `BINDGEN_EXTRA_CLANG_ARGS[_<target>]` / `LIBCLANG_PATH` handled by bindgen):
+//!
+//! * `RFAL_SKIP_C_BUILD` - when set to anything but `0`/empty, skip compiling
+//!   the C sources (bindings are still generated). The resulting crate will
+//!   not link into a final binary; this exists for doc builds and IDE/check
+//!   setups without a cross C compiler.
+//! * `DOCS_RS` - set by docs.rs; implies `RFAL_SKIP_C_BUILD`.
+//! * `ESP_IDF_PATH` - extra newlib headers for ESP-IDF bindgen runs.
 
-    if cfg!(feature = "compile-c") {
-        compile_c();
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=rfal");
+    println!("cargo:rerun-if-changed=src/c");
+    for var in [
+        "RFAL_SKIP_C_BUILD",
+        "DOCS_RS",
+        "ESP_IDF_PATH",
+        "LIBCLANG_PATH",
+    ] {
+        println!("cargo:rerun-if-env-changed={var}");
     }
 
-    generate_bindings();
+    let target = Target::from_env();
+    for var in [
+        "BINDGEN_EXTRA_CLANG_ARGS".to_string(),
+        format!("BINDGEN_EXTRA_CLANG_ARGS_{}", target.triple),
+        format!(
+            "BINDGEN_EXTRA_CLANG_ARGS_{}",
+            target.triple.replace('-', "_")
+        ),
+        format!("CC_{}", target.triple),
+        format!("CC_{}", target.triple.replace('-', "_")),
+        "TARGET_CC".to_string(),
+    ] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+
+    let defines = c_defines();
+
+    if skip_c_build() {
+        if env::var_os("DOCS_RS").is_none() {
+            println!(
+                "cargo:warning=st25r3916-rfal: RFAL_SKIP_C_BUILD is set, skipping the \
+                 RFAL C build; the crate will not link into a binary"
+            );
+        }
+    } else {
+        compile_c(&target, &defines);
+    }
+
+    generate_bindings(&target, &defines);
 }
 
-/// Returns the ST25R transceiver chip variant name defined by Cargo features.
-///
-/// Mutually exclusive features:
-/// - `st25r3916` -> defines `ST25R3916`
-/// - `st25r3916b` -> defines `ST25R3916B`
-///
-/// Returns one of the define strings, or panics if zero or more than one are active.
-fn get_chip_variant() -> &'static str {
-    let st25r3916 = cfg!(feature = "st25r3916");
-    let st25r3916b = cfg!(feature = "st25r3916b");
-    match (st25r3916, st25r3916b) {
+fn skip_c_build() -> bool {
+    if env::var_os("DOCS_RS").is_some() {
+        return true;
+    }
+    matches!(env::var("RFAL_SKIP_C_BUILD"), Ok(v) if !v.is_empty() && v != "0")
+}
+
+fn feature(name: &str) -> bool {
+    let var = format!("CARGO_FEATURE_{}", name.to_uppercase().replace('-', "_"));
+    env::var_os(var).is_some()
+}
+
+// ---------------------------------------------------------------------------
+// Target classification
+// ---------------------------------------------------------------------------
+
+struct Target {
+    triple: String,
+    os: String,
+    arch: String,
+    host: String,
+}
+
+impl Target {
+    fn from_env() -> Self {
+        Self {
+            triple: env::var("TARGET").expect("TARGET not set"),
+            os: env::var("CARGO_CFG_TARGET_OS").unwrap_or_default(),
+            arch: env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default(),
+            host: env::var("HOST").unwrap_or_default(),
+        }
+    }
+
+    /// No operating system and (usually) no C library: `thumbv*-none-*`,
+    /// `riscv32*-unknown-none-elf`, `xtensa-*-none-elf`, ...
+    fn is_bare_metal(&self) -> bool {
+        self.os == "none"
+    }
+
+    /// Espressif targets need Espressif's toolchain (and, for Xtensa, its
+    /// LLVM fork), so they get special bindgen treatment.
+    fn is_esp(&self) -> bool {
+        self.os == "espidf" || self.arch == "xtensa"
+    }
+
+    fn is_cross(&self) -> bool {
+        self.triple != self.host
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Feature -> C define mapping
+// ---------------------------------------------------------------------------
+
+/// Chip variant define. `st25r3916` and `st25r3916b` are mutually exclusive;
+/// if both are enabled (e.g. through feature unification) `ST25R3916B` wins
+/// and a warning is emitted, so `cargo check --all-features` keeps working.
+fn chip_variant() -> &'static str {
+    match (feature("st25r3916"), feature("st25r3916b")) {
         (true, false) => "ST25R3916",
         (false, true) => "ST25R3916B",
         (false, false) => panic!(
-            "st25r3916-rfal error: Exactly one chip variant feature must be enabled. \
-             Neither 'st25r3916' nor 'st25r3916b' is enabled. \
-             Please enable either 'st25r3916' or 'st25r3916b' (or use default features)."
+            "st25r3916-rfal: exactly one chip feature must be enabled: \
+             `st25r3916` or `st25r3916b` (the default)"
         ),
         (true, true) => {
-            println!("cargo:warning=st25r3916-rfal: Both 'st25r3916' and 'st25r3916b' features are enabled. Defaulting to ST25R3916B to prevent build failures during cargo sync/indexing.");
+            println!(
+                "cargo:warning=st25r3916-rfal: both `st25r3916` and `st25r3916b` are \
+                 enabled; building for ST25R3916B"
+            );
             "ST25R3916B"
         }
     }
 }
 
-/// Compiles the RFAL C library.
-///
-/// # Note on compiler discovery:
-/// Non-upstream-LLVM targets (such as Xtensa-based ESP32 chips today) do not have
-/// built-in naming conventions in Cargo's `cc` crate. Consumers targeting these
-/// platforms must supply `CC_<target>` and `AR_<target>` environment variables (or
-/// equivalent `.cargo/config.toml` target entries) pointing to the custom GCC toolchain.
-/// If these variables are not set, `build.rs` will bubble up `cc`'s compilation error
-/// instead of silently using the host compiler. Upstream-LLVM targets (such as ARM
-/// thumbv* and RISC-V riscv32*) are resolved automatically by `cc` using default naming tables.
-fn compile_c() {
-    let mut builder = cc::Build::new();
-
-    let target = std::env::var("TARGET").unwrap_or_default();
-    if target.contains("xtensa") {
-        builder.flag("-mlongcalls");
-    }
-
-    builder
-        .pic(false)
-        .include("rfal/inc")
-        .include("rfal/src")
-        .include("rfal/src/st25r3916")
-        .include("src")
-        .flag("-Wno-type-limits");
-
-    let variant = get_chip_variant();
-    builder.define(variant, None);
-    builder.file("src/platform_log.c");
-
-    let rfal_files = glob::glob("rfal/src/**/*.c").expect("Failed to read glob pattern");
-
-    for entry in rfal_files {
-        match entry {
-            Ok(path) => {
-                let filename = path.file_name().unwrap_or_default().to_string_lossy();
-                if filename == "st25r3916_led.c" || filename == "st25r3916_aat.c" {
-                    continue;
-                }
-                builder.file(&path);
-            }
-            Err(e) => println!("cargo:warning=Glob error: {:?}", e),
+fn c_defines() -> Vec<(&'static str, &'static str)> {
+    let mut defines = vec![(chip_variant(), "1")];
+    for (feat, define) in [
+        ("apple-ecp", "RFAL_FEATURE_APPLE_ECP"),
+        ("force-wupa", "RFAL_FEATURE_NFCA_FORCE_WUPA"),
+        ("poll-keep-field-on", "RFAL_FEATURE_POLL_KEEP_FIELD_ON"),
+    ] {
+        if feature(feat) {
+            defines.push((define, "1"));
         }
     }
-
-    builder.compile("rfal");
+    defines
 }
 
-struct TargetBindgenConfig {
-    /// Explicit `clang -target=...` to pass. `None` means let bindgen infer
-    /// from the normal Rust target triple (correct for any target that is
-    /// upstream LLVM — which is most non-Xtensa embedded targets: ARM
-    /// Cortex-M `thumbv*`, RISC-V `riscv32*`, etc).
-    clang_target: Option<String>,
-    /// Extra `-I` directories needed only for this target's SDK/toolchain
-    /// headers. Empty for targets that don't need anything beyond the
-    /// crate's own include dirs.
-    extra_include_dirs: Vec<std::path::PathBuf>,
-}
+const INCLUDE_DIRS: [&str; 4] = ["rfal/inc", "rfal/src", "rfal/src/st25r3916", "src/c"];
+const FREESTANDING_INCLUDE_DIR: &str = "src/c/freestanding";
 
-fn resolve_target_bindgen_config(target_triple: &str) -> TargetBindgenConfig {
-    if target_triple.contains("xtensa") || target_triple.contains("riscv32") {
-        esp_bindgen_config(target_triple)
-    } else {
-        TargetBindgenConfig {
-            clang_target: None,
-            extra_include_dirs: vec![],
+// ---------------------------------------------------------------------------
+// C compilation
+// ---------------------------------------------------------------------------
+
+fn compile_c(target: &Target, defines: &[(&str, &str)]) {
+    let mut build = cc::Build::new();
+    build.includes(INCLUDE_DIRS).warnings(false);
+
+    if target.is_bare_metal() || target.is_esp() {
+        // Firmware images are linked statically at fixed addresses.
+        build.pic(false);
+    }
+    if target.is_bare_metal() {
+        // Don't require a C library: our tiny <string.h> shim plus the
+        // compiler's own freestanding headers are all RFAL needs.
+        build
+            .flag("-ffreestanding")
+            .include(FREESTANDING_INCLUDE_DIR);
+    }
+    if target.arch == "xtensa" {
+        build.flag("-mlongcalls");
+    }
+    for (name, value) in defines {
+        build.define(name, Some(*value));
+    }
+
+    for entry in glob::glob("rfal/src/**/*.c").expect("valid glob pattern") {
+        let path = entry.expect("readable rfal/src entry");
+        // Antenna auto-tuning is not exposed and needs <stdlib.h> (abs()).
+        if path.file_name().is_some_and(|f| f == "st25r3916_aat.c") {
+            continue;
         }
+        build.file(path);
     }
+
+    build.compile("rfal");
 }
 
-fn esp_bindgen_config(target_triple: &str) -> TargetBindgenConfig {
-    let (mcu, arch_prefix) = if target_triple.contains("xtensa") {
-        let mcu = if let Some(idx) = target_triple.find("xtensa-") {
-            let after_xtensa = &target_triple[idx + "xtensa-".len()..];
-            after_xtensa.split('-').next().unwrap_or("esp32s3")
-        } else {
-            "esp32s3"
-        };
-        (mcu, "xtensa")
-    } else {
-        let mcu = if let Some(idx) = target_triple.find("riscv32imac-esp-") {
-            let after_riscv = &target_triple[idx + "riscv32imac-esp-".len()..];
-            after_riscv.split('-').next().unwrap_or("esp32c6")
-        } else {
-            "esp32c6"
-        };
-        (mcu, "riscv32")
-    };
+// ---------------------------------------------------------------------------
+// Bindings
+// ---------------------------------------------------------------------------
 
-    let clang_target = if arch_prefix == "xtensa" {
-        format!("xtensa-{}-elf", mcu)
-    } else {
-        format!("riscv32-{}-elf", mcu)
-    };
-    
-    let mut extra_include_dirs = Vec::new();
-
-    if let Ok(esp_idf_path) = std::env::var("ESP_IDF_PATH") {
-        extra_include_dirs.push(std::path::PathBuf::from(format!(
-            "{}/components/newlib/platform_include",
-            esp_idf_path
-        )));
-    }
-
-    if let Some(include_dir) = find_esp_include_dir(target_triple) {
-        extra_include_dirs.push(include_dir);
-    } else {
-        println!(
-            "cargo:warning=Could not find ESP toolchain headers. Bindgen may fail if standard headers are missing."
-        );
-    }
-
-    TargetBindgenConfig {
-        clang_target: Some(clang_target),
-        extra_include_dirs,
-    }
-}
-
-fn generate_bindings() {
-    let variant = get_chip_variant();
+fn generate_bindings(target: &Target, defines: &[(&str, &str)]) {
     let mut builder = bindgen::Builder::default()
         .header("rfal/inc/rfal_nfc.h")
         .header("rfal/inc/rfal_rf.h")
-        .clang_arg("-Irfal/inc")
-        .clang_arg("-Irfal/src")
-        .clang_arg("-Irfal/src/st25r3916")
-        .clang_arg("-Isrc")
+        .clang_args(INCLUDE_DIRS.iter().map(|d| format!("-I{d}")))
+        .clang_args(defines.iter().map(|(n, v)| format!("-D{n}={v}")))
         .clang_arg("-D__BINDGEN__")
-        .clang_arg("-D__attribute__(x)=")
-        .clang_arg("-D__extension__=")
-        .clang_arg(format!("-D{}", variant))
         .use_core()
+        // Deterministic output independent of whether rustfmt is installed:
+        // the type-wrapper generator below parses the bindings line by line.
+        .formatter(bindgen::Formatter::Prettyplease)
+        .layout_tests(false)
+        .generate_comments(false)
+        .allowlist_function("rfal.*")
+        .allowlist_type("rfal.*|ReturnCode")
+        .allowlist_var("RFAL_.*|rfal.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
 
-    let target = std::env::var("TARGET").unwrap_or_default();
-    let target_config = resolve_target_bindgen_config(&target);
-
-    if let Some(ref clang_target) = target_config.clang_target {
-        builder = builder.clang_arg(format!("--target={}", clang_target));
+    if target.is_bare_metal() {
+        builder = builder.clang_arg(format!("-I{FREESTANDING_INCLUDE_DIR}"));
     }
 
-    for dir in &target_config.extra_include_dirs {
-        builder = builder.clang_arg(format!("-I{}", dir.display()));
-    }
-
-    let bindings = builder.generate().expect("Unable to generate bindings");
-    let out_path = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let bindings_path = out_path.join("bindings.rs");
-    bindings
-        .write_to_file(&bindings_path)
-        .expect("Couldn't write bindings!");
-
-    // --- Post-processing: strip const-check blocks ---
-    let bindings_content =
-        std::fs::read_to_string(&bindings_path).expect("Could not read generated bindings");
-
-    let mut result = String::new();
-    let mut in_const_block = false;
-    let mut brace_depth = 0i32;
-
-    for line in bindings_content.lines() {
-        if line.contains("const _: () = {") {
-            in_const_block = true;
-            brace_depth = 1;
-            continue;
+    if target.is_esp() {
+        builder = builder.clang_arg(format!("--target={}", esp_clang_target(target)));
+        for dir in esp_include_dirs(target) {
+            builder = builder.clang_arg(format!("-isystem{}", dir.display()));
         }
-        if in_const_block {
-            brace_depth += line.matches('{').count() as i32;
-            brace_depth -= line.matches('}').count() as i32;
-            if brace_depth == 0 {
-                in_const_block = false;
+    } else if target.is_cross() && !target.is_bare_metal() && !has_user_bindgen_args(target) {
+        // Hosted cross target (e.g. a Linux SBC): clang needs the target's libc
+        // headers. Best effort: ask the C compiler `cc` would use for its sysroot.
+        if let Some(sysroot) = compiler_sysroot() {
+            builder = builder.clang_arg(format!("--sysroot={}", sysroot.display()));
+        }
+    }
+
+    let bindings = builder
+        .generate()
+        .expect("st25r3916-rfal: bindgen failed (is libclang installed? see README)");
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let mut content = bindings.to_string();
+
+    // RFAL's error codes are plain `#define RFAL_ERR_X ((ReturnCode)N)` macros,
+    // which bindgen cannot evaluate because of the cast; extract them by hand.
+    content.push_str("\n// --- RFAL_ERR_* constants extracted from rfal_utils.h ---\n");
+    let header =
+        std::fs::read_to_string("rfal/inc/rfal_utils.h").expect("could not read rfal_utils.h");
+    for (name, value) in extract_error_defines(&header) {
+        content.push_str(&format!("pub const {name}: u16 = {value};\n"));
+    }
+
+    std::fs::write(out_dir.join("bindings.rs"), &content).expect("could not write bindings.rs");
+    std::fs::write(
+        out_dir.join("rfal_types_gen.rs"),
+        generate_type_wrappers(&content),
+    )
+    .expect("could not write rfal_types_gen.rs");
+}
+
+fn has_user_bindgen_args(target: &Target) -> bool {
+    [
+        "BINDGEN_EXTRA_CLANG_ARGS".to_string(),
+        format!("BINDGEN_EXTRA_CLANG_ARGS_{}", target.triple),
+        format!(
+            "BINDGEN_EXTRA_CLANG_ARGS_{}",
+            target.triple.replace('-', "_")
+        ),
+    ]
+    .iter()
+    .any(|v| env::var_os(v).is_some())
+}
+
+/// `<gcc> -print-sysroot` of the compiler `cc` resolves for this target.
+fn compiler_sysroot() -> Option<PathBuf> {
+    let compiler = cc::Build::new()
+        .cargo_metadata(false)
+        .try_get_compiler()
+        .ok()?;
+    if compiler.is_like_clang() {
+        return None;
+    }
+    let out = Command::new(compiler.path())
+        .arg("-print-sysroot")
+        .output()
+        .ok()?;
+    let sysroot = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
+    (out.status.success() && !sysroot.as_os_str().is_empty() && sysroot.is_dir()).then_some(sysroot)
+}
+
+/// Clang target triple for Espressif chips. Xtensa needs Espressif's LLVM
+/// fork, which names targets `xtensa-<mcu>-elf`; the RISC-V ESP chips are
+/// plain upstream `riscv32` with an ESP vendor.
+fn esp_clang_target(target: &Target) -> String {
+    if target.arch == "xtensa" {
+        // Rust triples: xtensa-esp32-espidf, xtensa-esp32s3-none-elf, ...
+        let mcu = target.triple.split('-').nth(1).unwrap_or("esp32");
+        format!("xtensa-{mcu}-elf")
+    } else {
+        format!("{}-esp-elf", target.arch)
+    }
+}
+
+/// libc (newlib) headers for bindgen on ESP targets.
+fn esp_include_dirs(target: &Target) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(idf) = env::var("ESP_IDF_PATH") {
+        let dir = Path::new(&idf).join("components/newlib/platform_include");
+        if dir.is_dir() {
+            dirs.push(dir);
+        }
+    }
+    let toolchain = if target.arch == "xtensa" {
+        "xtensa-esp-elf"
+    } else {
+        "riscv32-esp-elf"
+    };
+
+    // 1. The compiler explicitly configured for this target.
+    let cc_var = [
+        format!("CC_{}", target.triple),
+        format!("CC_{}", target.triple.replace('-', "_")),
+        "TARGET_CC".to_string(),
+    ]
+    .into_iter()
+    .find_map(|v| env::var(v).ok());
+    if let Some(dir) = cc_var.and_then(|cc| gcc_libc_include_dir(Path::new(&cc), toolchain)) {
+        dirs.push(dir);
+        return dirs;
+    }
+
+    // 2. Toolchains installed by embuild/espup next to the project or in $HOME.
+    let mut roots = Vec::new();
+    if let Ok(manifest) = env::var("CARGO_MANIFEST_DIR") {
+        roots.extend(Path::new(&manifest).ancestors().map(Path::to_path_buf));
+    }
+    if let Some(home) = env::var_os("HOME") {
+        roots.push(PathBuf::from(home));
+    }
+    for root in roots {
+        for base in [".embuild/espressif/tools", ".espressif/tools"] {
+            let pattern = root.join(format!(
+                "{base}/{toolchain}/*/{toolchain}/{toolchain}/include"
+            ));
+            if let Some(dir) = glob_first(&pattern.to_string_lossy()) {
+                dirs.push(dir);
+                return dirs;
             }
-            continue;
         }
-        result.push_str(line);
-        result.push('\n');
     }
 
-    // --- Append RFAL_ERR constants extracted from the header ---
-    let header_content =
-        std::fs::read_to_string("rfal/inc/rfal_utils.h").expect("Could not read rfal_utils.h");
+    println!(
+        "cargo:warning=st25r3916-rfal: could not find the {toolchain} libc headers; \
+         set CC_{} or BINDGEN_EXTRA_CLANG_ARGS_{} if bindgen fails",
+        target.triple, target.triple
+    );
+    dirs
+}
 
-    result.push_str("\n// --- Dynamically Extracted RFAL Errors ---\n");
-    for line in header_content.lines() {
-        if line.starts_with("#define RFAL_ERR_") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 {
-                let name = parts[1];
-                let val_str = parts[2];
-                let number: String = val_str.chars().filter(|c| c.is_ascii_digit()).collect();
-                if !number.is_empty() {
-                    result.push_str(&format!("pub const {}: u16 = {};\n", name, number));
-                }
+/// `<toolchain_root>/<toolchain>/include` for a GCC at `<toolchain_root>/bin/<gcc>`,
+/// falling back to `-print-sysroot`.
+fn gcc_libc_include_dir(cc: &Path, toolchain: &str) -> Option<PathBuf> {
+    let root = cc.parent()?.parent()?;
+    let candidate = root.join(toolchain).join("include");
+    if candidate.join("string.h").is_file() {
+        return Some(candidate);
+    }
+    let out = Command::new(cc).arg("-print-sysroot").output().ok()?;
+    let sysroot = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
+    let candidate = sysroot.join("include");
+    candidate.join("string.h").is_file().then_some(candidate)
+}
+
+fn glob_first(pattern: &str) -> Option<PathBuf> {
+    glob::glob(pattern).ok()?.flatten().next()
+}
+
+/// Parses `#define RFAL_ERR_NAME ((ReturnCode)N)` lines.
+fn extract_error_defines(header: &str) -> Vec<(String, u16)> {
+    header
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            if parts.next()? != "#define" {
+                return None;
             }
-        }
-    }
-
-    std::fs::write(&bindings_path, result).expect("Could not write filtered bindings");
-
-    // --- Generate Rust type wrappers from the processed bindings ---
-    generate_type_wrappers(&bindings_path, &out_path);
+            let name = parts.next()?;
+            if !name.starts_with("RFAL_ERR_") {
+                return None;
+            }
+            let digits: String = parts.next()?.chars().filter(char::is_ascii_digit).collect();
+            Some((name.to_string(), digits.parse().ok()?))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
-// Type-wrapper generator
+// Type-wrapper generator: turns `pub type rfalX = c_uint;` + its
+// `pub const rfalX_Y: rfalX = N;` constants into a Rust enum `RfalX`.
 // ---------------------------------------------------------------------------
 
-fn generate_type_wrappers(bindings_path: &std::path::Path, out_dir: &std::path::Path) {
-    use std::collections::HashMap;
+fn generate_type_wrappers(content: &str) -> String {
+    use std::collections::BTreeMap;
 
-    let content =
-        std::fs::read_to_string(bindings_path).expect("Failed to read bindings for type gen");
-
-    // Step 1: collect all `pub type rfal<Name> = ::core::ffi::c_{uint|int|...};`
-    let mut type_repr: HashMap<String, &'static str> = HashMap::new();
+    // Step 1: integer typedefs `pub type rfal<Name> = ::core::ffi::c_*;`
+    let mut type_repr: BTreeMap<String, &'static str> = BTreeMap::new();
     for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("pub type rfal") {
-            if let Some((name_suffix, rhs)) = rest.split_once(" = ") {
-                let type_name = format!("rfal{}", name_suffix.trim());
-                let repr = if rhs.contains("c_uint") || rhs.contains("c_ulong") {
-                    "u32"
-                } else if rhs.contains("c_int") {
-                    "i32"
-                } else if rhs.contains("c_ushort") {
-                    "u16"
-                } else if rhs.contains("c_short") {
-                    "i16"
-                } else {
-                    continue; // skip function pointers, struct aliases, etc.
-                };
-                type_repr.insert(type_name, repr);
-            }
-        }
+        let Some(rest) = line.trim().strip_prefix("pub type rfal") else {
+            continue;
+        };
+        let Some((name, rhs)) = rest.split_once(" = ") else {
+            continue;
+        };
+        let repr = if rhs.contains("c_uint") || rhs.contains("c_ulong") {
+            "u32"
+        } else if rhs.contains("c_int") {
+            "i32"
+        } else if rhs.contains("c_ushort") {
+            "u16"
+        } else if rhs.contains("c_short") {
+            "i16"
+        } else {
+            continue; // function pointers, struct aliases, ...
+        };
+        type_repr.insert(format!("rfal{}", name.trim()), repr);
     }
 
-    // Step 2: collect `pub const {TypeName}_{SUFFIX}: {TypeName} = N;` for each type
-    let mut type_constants: HashMap<String, Vec<(String, i64)>> = HashMap::new();
+    // Step 2: `pub const {Type}_{SUFFIX}: {Type} = N;`
+    let mut constants: BTreeMap<String, Vec<(String, i64)>> = BTreeMap::new();
     for line in content.lines() {
-        if !line.starts_with("pub const ") {
+        let Some(rest) = line.trim().strip_prefix("pub const ") else {
+            continue;
+        };
+        let Some((name, rhs)) = rest.split_once(": ") else {
+            continue;
+        };
+        let Some((ty, value)) = rhs.split_once(" = ") else {
+            continue;
+        };
+        if !type_repr.contains_key(ty) {
             continue;
         }
-        for type_name in type_repr.keys() {
-            let intro = format!("pub const {}_", type_name);
-            if let Some(rest) = line.strip_prefix(&intro) {
-                if let Some((suffix, val_section)) = rest.split_once(": ") {
-                    if let Some((_, raw_val)) = val_section.split_once(" = ") {
-                        let raw_val = raw_val.trim_end_matches(';').trim();
-                        if let Ok(val) = raw_val.parse::<i64>() {
-                            type_constants
-                                .entry(type_name.clone())
-                                .or_default()
-                                .push((suffix.to_string(), val));
-                        }
-                    }
-                }
-                break;
-            }
+        let Some(suffix) = name.strip_prefix(ty).and_then(|s| s.strip_prefix('_')) else {
+            continue;
+        };
+        if let Ok(value) = value.trim_end_matches(';').trim().parse::<i64>() {
+            constants
+                .entry(ty.to_string())
+                .or_default()
+                .push((suffix.to_string(), value));
         }
     }
 
-    // Step 3: emit generated code
-    let mut out = String::from(
-        "// AUTO-GENERATED by build.rs — do not edit.\n\
-         // Re-runs automatically on every `cargo build`.\n\n\
-         use strum::{Display, EnumString, FromRepr};\n\n",
-    );
+    let mut out =
+        String::from("// AUTO-GENERATED by build.rs from the RFAL bindings - do not edit.\n\n");
 
-    let mut names: Vec<String> = type_constants
-        .keys()
-        .filter(|t| !type_constants[*t].is_empty())
-        .cloned()
-        .collect();
-    names.sort();
-
-    for c_type in &names {
-        let repr = type_repr[c_type];
-        let rust_name = capitalize_first(c_type); // rfalMode -> RfalMode
-
-        let mut variants: Vec<(String, i64)> = type_constants[c_type].clone();
+    for (c_type, mut variants) in constants {
+        let repr = type_repr[&c_type];
+        let rust_name = capitalize_first(&c_type);
         variants.sort_by_key(|(_, v)| *v);
-        variants.dedup_by_key(|(_, v)| *v); // remove duplicate discriminants
+        variants.dedup_by_key(|(_, v)| *v); // aliases share a discriminant
 
-        if variants.is_empty() {
-            continue;
-        }
-
-        let suffix_strs: Vec<&str> = variants.iter().map(|(n, _)| n.as_str()).collect();
-        let common = common_underscore_prefix(&suffix_strs);
-
+        let suffixes: Vec<&str> = variants.iter().map(|(n, _)| n.as_str()).collect();
+        let common = common_underscore_prefix(&suffixes);
         let fallback = common
             .trim_end_matches('_')
             .rsplit('_')
             .next()
-            .map(|w| capitalize_word(w))
+            .map(capitalize_word)
             .unwrap_or_default();
 
-        // 1. Appended strum's Display, EnumString, and FromRepr macros here:
         out.push_str(&format!(
-            "#[allow(dead_code)]\n\
-             #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, FromRepr)]\n\
-             #[repr({})]\n\
-             pub enum {} {{\n",
-            repr, rust_name
+            "/// Rust mirror of the C enum `{c_type}`.\n\
+             #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::FromRepr)]\n\
+             #[repr({repr})]\n\
+             pub enum {rust_name} {{\n"
         ));
         for (c_name, value) in &variants {
             let rem = c_name.strip_prefix(&common).unwrap_or(c_name);
-            let variant = make_variant_name(rem, &fallback);
-            out.push_str(&format!("    {} = {},\n", variant, value));
+            out.push_str(&format!(
+                "    /// `{c_name}`\n    {} = {value},\n",
+                make_variant_name(rem, &fallback)
+            ));
         }
         out.push_str("}\n\n");
-
-        // 2. Erased the manual TryFrom block! Strum's FromRepr handles it natively.
-        // If you still want the TryFrom trait interface for polymorphism, you can wrap strum's from_repr:
         out.push_str(&format!(
-            "impl TryFrom<{repr}> for {name} {{\n\
-    \x20   type Error = ();\n\
-    \x20   #[inline]\n\
-    \x20   fn try_from(v: {repr}) -> Result<Self, ()> {{\n\
-    \x20       Self::from_repr(v).ok_or(())\n\
-    \x20   }}\n\
-    }}\n\n",
-            repr = repr,
-            name = rust_name
-        ));
-
-        // From<RustName> for repr
-        out.push_str(&format!(
-            "impl From<{name}> for {repr} {{\n    #[inline]\n    fn from(v: {name}) -> {repr} {{ v as {repr} }}\n}}\n\n",
-            name = rust_name,
-            repr = repr
+            "impl TryFrom<{repr}> for {rust_name} {{\n\
+             \x20   type Error = ();\n\
+             \x20   #[inline]\n\
+             \x20   fn try_from(v: {repr}) -> Result<Self, ()> {{\n\
+             \x20       Self::from_repr(v).ok_or(())\n\
+             \x20   }}\n\
+             }}\n\n\
+             impl From<{rust_name}> for {repr} {{\n\
+             \x20   #[inline]\n\
+             \x20   fn from(v: {rust_name}) -> {repr} {{\n\
+             \x20       v as {repr}\n\
+             \x20   }}\n\
+             }}\n\n"
         ));
     }
 
-    // Step 4: RfalError from RFAL_ERR_* u16 constants
-    let mut errors: Vec<(String, u16)> = Vec::new();
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("pub const RFAL_ERR_") {
-            if let Some((name, val_part)) = rest.split_once(": u16 = ") {
-                let val_str = val_part.trim_end_matches(';');
-                if let Ok(val) = val_str.parse::<u16>() {
-                    errors.push((screaming_snake_to_camel(name), val));
-                }
-            }
-        }
+    // RfalError from the RFAL_ERR_* constants.
+    let mut errors: Vec<(String, u16)> = content
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("pub const RFAL_ERR_")?;
+            let (name, value) = rest.split_once(": u16 = ")?;
+            Some((
+                screaming_snake_to_camel(name),
+                value.trim_end_matches(';').parse().ok()?,
+            ))
+        })
+        .collect();
+    errors.sort_by_key(|(_, v)| *v);
+    errors.dedup_by_key(|(_, v)| *v);
+
+    out.push_str(
+        "/// RFAL return codes (`RFAL_ERR_*`). [`RfalError::None`] is success and is\n\
+         /// never returned as an `Err` by this crate.\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::FromRepr)]\n\
+         #[repr(u16)]\n\
+         pub enum RfalError {\n",
+    );
+    for (name, value) in &errors {
+        out.push_str(&format!("    {name} = {value},\n"));
     }
-
-    if !errors.is_empty() {
-        errors.sort_by_key(|(_, v)| *v);
-
-        // Added strum derivations to RfalError
-        out.push_str(
-            "#[allow(dead_code)]\n\
-             #[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString, FromRepr)]\n\
-             #[repr(u16)]\n\
-             pub enum RfalError {\n",
-        );
-        for (name, val) in &errors {
-            out.push_str(&format!("    {} = {},\n", name, val));
-        }
-        out.push_str("}\n\n");
-
-        // Wrapped strum's FromRepr to fulfill the TryFrom trait cleanly
-        out.push_str(
-            "impl TryFrom<u16> for RfalError {\n\
-    \x20   type Error = ();\n\
-    \x20   #[inline]\n\
-    \x20   fn try_from(v: u16) -> Result<Self, ()> {\n\
-    \x20       Self::from_repr(v).ok_or(())\n\
-    \x20   }\n\
-    }\n\n",
-        );
-        out.push_str(
-            "impl From<RfalError> for u16 {\n    #[inline]\n    fn from(v: RfalError) -> u16 { v as u16 }\n}\n",
-        );
-    }
-
-    let out_path = out_dir.join("rfal_types_gen.rs");
-    std::fs::write(&out_path, out).expect("Failed to write rfal_types_gen.rs");
+    out.push_str(
+        "}\n\n\
+         impl TryFrom<u16> for RfalError {\n\
+         \x20   type Error = ();\n\
+         \x20   #[inline]\n\
+         \x20   fn try_from(v: u16) -> Result<Self, ()> {\n\
+         \x20       Self::from_repr(v).ok_or(())\n\
+         \x20   }\n\
+         }\n\n\
+         impl From<RfalError> for u16 {\n\
+         \x20   #[inline]\n\
+         \x20   fn from(v: RfalError) -> u16 {\n\
+         \x20       v as u16\n\
+         \x20   }\n\
+         }\n",
+    );
+    out
 }
+
 // ---------------------------------------------------------------------------
 // Naming helpers
 // ---------------------------------------------------------------------------
 
-/// Capitalize only the first character, leave the rest unchanged.
-/// `rfalMode` → `RfalMode`
+/// `rfalMode` -> `RfalMode`
 fn capitalize_first(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -428,8 +551,7 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
-/// Capitalize first char, lowercase the rest of a single word.
-/// `HELLO` → `Hello`, `FSX` → `Fsx`
+/// `HELLO` -> `Hello`
 fn capitalize_word(w: &str) -> String {
     let mut c = w.chars();
     match c.next() {
@@ -438,168 +560,43 @@ fn capitalize_word(w: &str) -> String {
     }
 }
 
-/// Convert SCREAMING_SNAKE_CASE to CamelCase, one word at a time.
-/// Words beginning with a digit are kept verbatim (digit + rest lowercased).
+/// `SCREAMING_SNAKE` -> `ScreamingSnake`; digit-led words are kept verbatim.
 fn screaming_snake_to_camel(s: &str) -> String {
     s.split('_')
         .filter(|w| !w.is_empty())
-        .map(|w| {
-            let mut chars = w.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(c) if c.is_ascii_alphabetic() => {
-                    c.to_ascii_uppercase().to_string() + &chars.as_str().to_ascii_lowercase()
-                }
-                // digit-leading segment: keep digit, lowercase the rest
-                Some(c) => c.to_string() + &chars.as_str().to_ascii_lowercase(),
-            }
-        })
+        .map(capitalize_word)
         .collect()
 }
 
-/// Longest common prefix of all strings, trimmed to the last `_` boundary.
-/// For a single-element slice the prefix is everything up to the last `_`.
+/// Longest common prefix of all strings, cut back to the last `_`.
 fn common_underscore_prefix(strs: &[&str]) -> String {
-    if strs.is_empty() {
+    let Some(first) = strs.first() else {
         return String::new();
-    }
-    let first = strs[0];
-    if strs.len() == 1 {
-        return match first.rfind('_') {
-            Some(pos) => first[..pos + 1].to_string(),
-            None => String::new(),
-        };
-    }
-    let common_len = strs[1..].iter().fold(first.len(), |acc, s| {
-        let eq = first
-            .chars()
-            .zip(s.chars())
-            .take_while(|(a, b)| a == b)
-            .count();
-        acc.min(eq)
-    });
-    let prefix = &first[..common_len];
-    match prefix.rfind('_') {
-        Some(pos) => prefix[..pos + 1].to_string(),
+    };
+    let common_len = if strs.len() == 1 {
+        first.len()
+    } else {
+        strs[1..].iter().fold(first.len(), |acc, s| {
+            acc.min(
+                first
+                    .bytes()
+                    .zip(s.bytes())
+                    .take_while(|(a, b)| a == b)
+                    .count(),
+            )
+        })
+    };
+    match first[..common_len].rfind('_') {
+        Some(pos) => first[..=pos].to_string(),
         None => String::new(),
     }
 }
 
-/// Convert the stripped constant suffix into a valid CamelCase Rust identifier.
-/// If the name starts with a digit, `fallback_prefix` (derived from the common
-/// prefix) is prepended so the identifier is valid.
+/// CamelCase variant name; digit-led names get `fallback_prefix` prepended.
 fn make_variant_name(remaining: &str, fallback_prefix: &str) -> String {
-    if remaining
-        .chars()
-        .next()
-        .map(|c| c.is_ascii_digit())
-        .unwrap_or(false)
-    {
-        format!("{}{}", fallback_prefix, screaming_snake_to_camel(remaining))
+    if remaining.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("{fallback_prefix}{}", screaming_snake_to_camel(remaining))
     } else {
         screaming_snake_to_camel(remaining)
     }
-}
-
-fn find_esp_include_dir(target_triple: &str) -> Option<std::path::PathBuf> {
-    // 1. Try finding it from the active compiler in the environment
-    let target_cc_var = format!("CC_{}", target_triple.replace('-', "_"));
-    if let Ok(cc_val) = std::env::var(&target_cc_var).or_else(|_| std::env::var("CC")) {
-        let cc_path = std::path::Path::new(&cc_val);
-        if let Some(include_dir) = find_include_dir_from_compiler(cc_path) {
-            return Some(include_dir);
-        }
-    }
-
-    // 2. Try searching in parent directories of CARGO_MANIFEST_DIR
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let mut current = std::path::PathBuf::from(manifest_dir);
-        loop {
-            // Search in .embuild for both xtensa and riscv32
-            for arch in &["xtensa-esp-elf", "riscv32-esp-elf"] {
-                let embuild_pattern = current.join(format!(
-                    ".embuild/espressif/tools/{}/*/{}/{}/include",
-                    arch, arch, arch
-                ));
-                if let Some(path) = glob_first(&embuild_pattern.to_string_lossy()) {
-                    return Some(path);
-                }
-            }
-
-            // Search in .espressif
-            for arch in &["xtensa-esp-elf", "riscv32-esp-elf"] {
-                let espressif_pattern = current.join(format!(
-                    ".espressif/tools/{}/*/{}/{}/include",
-                    arch, arch, arch
-                ));
-                if let Some(path) = glob_first(&espressif_pattern.to_string_lossy()) {
-                    return Some(path);
-                }
-            }
-
-            if !current.pop() {
-                break;
-            }
-        }
-    }
-
-    // 3. Fallback to user home directory
-    let home = std::env::var("HOME").unwrap_or_default();
-
-    for arch in &["xtensa-esp-elf", "riscv32-esp-elf"] {
-        let home_espressif_pattern = format!(
-            "{}/.espressif/tools/{}/*/{}/{}/include",
-            home, arch, arch, arch
-        );
-        if let Some(path) = glob_first(&home_espressif_pattern) {
-            return Some(path);
-        }
-
-        let home_embuild_pattern = format!(
-            "{}/.embuild/espressif/tools/{}/*/{}/{}/include",
-            home, arch, arch, arch
-        );
-        if let Some(path) = glob_first(&home_embuild_pattern) {
-            return Some(path);
-        }
-    }
-
-    None
-}
-
-fn find_include_dir_from_compiler(cc_path: &std::path::Path) -> Option<std::path::PathBuf> {
-    let parent = cc_path.parent()?; // bin/
-    let toolchain_root = parent.parent()?; // xtensa-esp-elf/ or riscv32-esp-elf/
-
-    // Check for standard layout: toolchain_root/target/include
-    if let Ok(entries) = std::fs::read_dir(toolchain_root) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                if path.is_dir() {
-                    let candidate = path.join("include");
-                    if candidate.exists() {
-                        return Some(candidate);
-                    }
-                }
-            }
-        }
-    }
-
-    // Check for flat layout: toolchain_root/include
-    let candidate = toolchain_root.join("include");
-    if candidate.exists() {
-        return Some(candidate);
-    }
-
-    None
-}
-
-fn glob_first(pattern: &str) -> Option<std::path::PathBuf> {
-    if let Ok(entries) = glob::glob(pattern) {
-        if let Some(Ok(path)) = entries.into_iter().next() {
-            return Some(path);
-        }
-    }
-    None
 }

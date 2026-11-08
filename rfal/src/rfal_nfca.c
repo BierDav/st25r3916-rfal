@@ -584,8 +584,13 @@ ReturnCode rfalNfcaPollerStartTechnologyDetection( rfalComplianceMode compMode, 
     ReturnCode ret;
     
     gNfca.DT.compMode = compMode;
-    /* Always use WUPA (0x52) so phones in both IDLE and HALT states respond immediately */
+#if defined(RFAL_FEATURE_NFCA_FORCE_WUPA) && RFAL_FEATURE_NFCA_FORCE_WUPA
+    /* st25r3916-rfal: (feature `force-wupa`) always send WUPA instead of REQA so
+     * that cards/phones in HALT state also answer technology detection. */
     gNfca.DT.ret      = rfalNfcaPollerCheckPresence( RFAL_14443A_SHORTFRAME_CMD_WUPA, sensRes );
+#else
+    gNfca.DT.ret      = rfalNfcaPollerCheckPresence( ((compMode == RFAL_COMPLIANCE_MODE_EMV) ? RFAL_14443A_SHORTFRAME_CMD_WUPA : RFAL_14443A_SHORTFRAME_CMD_REQA), sensRes );
+#endif /* RFAL_FEATURE_NFCA_FORCE_WUPA */
     
     /* Send SLP_REQ as  Activity 1.1  9.2.3.6 and EMVCo 2.6  9.2.1.3 */
     if( (gNfca.DT.compMode != RFAL_COMPLIANCE_MODE_ISO) && (gNfca.DT.ret == RFAL_ERR_NONE) )

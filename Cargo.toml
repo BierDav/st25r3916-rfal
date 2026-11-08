@@ -2,36 +2,57 @@
 name = "st25r3916-rfal"
 version = "0.1.0"
 edition = "2021"
-
-[features]
-# By default, compile for the ST25R3916B transceiver variant.
-default = ["st25r3916b"]
-
-# Enable C compilation of RFAL. Disabled by default for library usage.
-# Enable this in your binary crate if you have the target C compiler installed.
-compile-c = []
-
-# Enable platform-agnostic logging support.
-log = ["dep:log"]
-
-# Enable standard library support.
-std = []
-
-# ESP-IDF SDK integration. Enables ESP-IDF-specific safe wrappers and platform drivers.
-esp-idf = [
-    "dep:esp-idf-svc",
-    "dep:esp-idf-sys",
-    "dep:esp-idf-hal",
-    "log",
-    "std",
-    "dep:embedded-hal"
+rust-version = "1.82"
+description = "Safe Rust wrapper around ST's RFAL C library (v4.0.2) for the ST25R3916 / ST25R3916B NFC reader ICs"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/BierDav/st25r3916-rfal"
+readme = "README.md"
+keywords = ["nfc", "rfid", "st25r3916", "embedded", "no-std"]
+categories = ["embedded", "hardware-support", "no-std"]
+include = [
+    "/Cargo.toml",
+    "/build.rs",
+    "/src/**/*.rs",
+    "/src/c/**/*.h",
+    "/rfal/inc/*.h",
+    "/rfal/src/**/*.c",
+    "/rfal/src/**/*.h",
+    "/rfal/LICENSE-ST.md",
+    "/rfal/MODIFICATIONS.md",
+    "/README.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
 ]
 
-# Use the ST25R3916 transceiver chip variant (mutually exclusive with st25r3916b).
-st25r3916 = []
+[package.metadata.docs.rs]
+# DOCS_RS is set on docs.rs, so build.rs only generates bindings there.
+features = ["log"]
+targets = ["x86_64-unknown-linux-gnu"]
 
-# Use the ST25R3916B transceiver chip variant (mutually exclusive with st25r3916).
+[features]
+default = ["st25r3916b"]
+
+# Chip variant. Exactly one should be enabled; `st25r3916b` is the default.
+# Use `default-features = false, features = ["st25r3916"]` for the original
+# ST25R3916. If both end up enabled, ST25R3916B is used (with a build warning).
+st25r3916 = []
 st25r3916b = []
+
+# Forward crate diagnostics to the `log` facade.
+log = ["dep:log"]
+
+# --- Opt-in deviations from ST's upstream RFAL behaviour (see rfal/MODIFICATIONS.md) ---
+# Send an Apple ECP v1 "VAS only" frame whenever NFC-A technology detection finds
+# nothing, so nearby iPhones bring up Apple Wallet.
+apple-ecp = []
+# Always use WUPA instead of REQA for NFC-A technology detection (also wakes HALTed cards).
+force-wupa = []
+# In poll-only discovery (no listen technologies) keep the RF field on between rounds.
+poll-keep-field-on = []
+
+# ESP-IDF platform layer (SPI/GPIO/timer callbacks, worker thread, `NfcReader::builder`).
+# Only has an effect on ESP-IDF targets (`target_os = "espidf"`).
+esp-idf = ["log", "dep:esp-idf-svc", "dep:esp-idf-sys", "dep:esp-idf-hal", "dep:embedded-hal"]
 
 [dependencies]
 strum = { version = "0.26", default-features = false, features = ["derive"] }
@@ -39,12 +60,12 @@ bon = { version = "3", default-features = false }
 log = { version = "0.4.29", optional = true }
 embedded-hal = { version = "1.0.0", optional = true }
 
-[target.'cfg(any(target_os = "espidf", target_arch = "xtensa"))'.dependencies]
+[target.'cfg(target_os = "espidf")'.dependencies]
 esp-idf-svc = { version = "0.52.1", features = ["critical-section", "embassy-sync"], optional = true }
 esp-idf-sys = { version = "0.37.2", optional = true }
 esp-idf-hal = { version = "0.46.2", optional = true }
 
 [build-dependencies]
-bindgen = "0.72.1"
-cc = "1.0"
+bindgen = { version = "0.72.1", features = ["prettyplease"] }
+cc = "1.2"
 glob = "0.3.3"

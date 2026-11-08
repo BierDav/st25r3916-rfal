@@ -433,12 +433,16 @@ void rfalNfcWorker( void )
             {
                 if( ( err != RFAL_ERR_NONE) || (gNfcDev.techsFound == RFAL_NFC_TECH_NONE) )/* Check if any error occurred or no techs were found   */
                 {
+                #if defined(RFAL_FEATURE_POLL_KEEP_FIELD_ON) && RFAL_FEATURE_POLL_KEEP_FIELD_ON
+                    /* st25r3916-rfal: (feature `poll-keep-field-on`) in pure poller mode
+                     * (no listen techs configured) keep the RF carrier on between
+                     * discovery rounds instead of switching it off. */
                     if( gNfcDev.lmMask == 0U )
                     {
-                        /* Pure reader/poller mode: keep RF carrier continuously on */
                         gNfcDev.state = RFAL_NFC_STATE_LISTEN_TECHDETECT;
                         break;
                     }
+                #endif /* RFAL_FEATURE_POLL_KEEP_FIELD_ON */
 
                     rfalFieldOff();
                     gNfcDev.isFieldOn = false;
@@ -465,21 +469,41 @@ void rfalNfcWorker( void )
                     break;                                                            /* Unable to retrieve any device, restart loop          */
                 }
                 
-                /* Always activate the first device found */
+                /* Check if more than one device has been found */
+                if( gNfcDev.devCnt > 1U )
+                {
+                    /* If more than one device was found inform upper layer to choose which one to activate */
+                    if( gNfcDev.disc.notifyCb != NULL )
+                    {
+                        gNfcDev.state = RFAL_NFC_STATE_POLL_SELECT;
+                        gNfcDev.disc.notifyCb( gNfcDev.state );
+                        break;
+                    }
+                }
+                
+                /* If only one device or no callback has been set, activate the first device found */
                 gNfcDev.selDevIdx = 0U;
                 gNfcDev.state = RFAL_NFC_STATE_POLL_ACTIVATION;
             }
             break;
-
-
+        
+            
         /*******************************************************************************/
         case RFAL_NFC_STATE_POLL_ACTIVATION:
-
+            
             err = rfalNfcPollActivation( gNfcDev.selDevIdx );
             if( err != RFAL_ERR_BUSY )                                                     /* Wait until all Activation is complete */
             {
                 if( err != RFAL_ERR_NONE )                                                 /* Check if activation has failed        */
                 {
+                    /* Check if more than one device has been found */
+                    if( (gNfcDev.devCnt > 1U) && (gNfcDev.disc.notifyCb != NULL) )
+                    {
+                        gNfcDev.state = RFAL_NFC_STATE_POLL_SELECT;
+                        rfalNfcNfcNotify( gNfcDev.state );
+                        break;
+                    }
+                    
                     gNfcDev.deactType = RFAL_NFC_DEACTIVATE_DISCOVERY;                /* Ensure deactivation, not Sleep        */
                     gNfcDev.state     = RFAL_NFC_STATE_DEACTIVATION;                  /* If Activation failed, restart loop    */
                     break;
@@ -530,20 +554,25 @@ void rfalNfcWorker( void )
         
         /*******************************************************************************/
         case RFAL_NFC_STATE_LISTEN_TECHDETECT:
-
+            
             if( platformTimerIsExpired( gNfcDev.discTmr ) )
             {
+            #if defined(RFAL_FEATURE_POLL_KEEP_FIELD_ON) && RFAL_FEATURE_POLL_KEEP_FIELD_ON
+                /* st25r3916-rfal: (feature `poll-keep-field-on`) only stop listen
+                 * mode / turn the field off when listen techs are configured. */
                 if( gNfcDev.lmMask != 0U )
+            #endif /* RFAL_FEATURE_POLL_KEEP_FIELD_ON */
                 {
-                    #if RFAL_FEATURE_LISTEN_MODE
-                        rfalListenStop();
-                    #else
-                        rfalFieldOff();
-                    #endif /* RFAL_FEATURE_LISTEN_MODE */
-                    gNfcDev.isFieldOn = false;
+                #if RFAL_FEATURE_LISTEN_MODE
+                    rfalListenStop();
+                #else
+                    rfalFieldOff();
+                #endif /* RFAL_FEATURE_LISTEN_MODE */
+                gNfcDev.isFieldOn = false;
                 }
-
+                
                 gNfcDev.state = RFAL_NFC_STATE_START_DISCOVERY;                       /* Restart the discovery loop */
+                rfalNfcNfcNotify( gNfcDev.state );                                    /* Notify caller             */
                 break;
             }
 
@@ -927,11 +956,7 @@ static ReturnCode rfalNfcPollTechDetection( void )
         if( !gNfcDev.isTechInit )
         {
             RFAL_EXIT_ON_ERR( err, rfalNfcaPollerInitialize() );                       /* Initialize RFAL for NFC-A */
-            if( !gNfcDev.isFieldOn )
-            {
-                RFAL_EXIT_ON_ERR( err, rfalFieldOnAndStartGT() );                      /* Turns Field On and starts GT timer */
-                gNfcDev.isFieldOn = true;
-            }
+            RFAL_EXIT_ON_ERR( err, rfalFieldOnAndStartGT() );                          /* As field is already On only starts GT timer */
             gNfcDev.isTechInit    = true;
             gNfcDev.isOperOngoing = false;                                             /* No operation currently ongoing  */
         }
@@ -953,25 +978,22 @@ static ReturnCode rfalNfcPollTechDetection( void )
                 {
                     gNfcDev.techsFound |= RFAL_NFC_POLL_TECH_A;
                 }
+            #if defined(RFAL_FEATURE_APPLE_ECP) && RFAL_FEATURE_APPLE_ECP
                 else
                 {
-                    /* Apple Enhanced Contactless Polling (ECP v1) */
-                    /* Emits VAS Only polling frame so iPhones in proximity */
-                    /* activate Apple Wallet and display the pass */
-                    uint8_t rx_data[1];
-                    uint16_t rx_len = 0;
-                    static const uint8_t ecp_frame[7] = {0x6a, 0x01, 0x00, 0x00, 0x02, 0xe4, 0xd2};
-                    rfalTransceiveBlockingTxRx(
-                        (uint8_t*)ecp_frame,
-                        7,
-                        rx_data,
-                        0,
-                        &rx_len,
-                        RFAL_TXRX_FLAGS_DEFAULT | RFAL_TXRX_FLAGS_CRC_TX_MANUAL,
-                        6780
-                    );
+                    /* st25r3916-rfal: (feature `apple-ecp`) Apple Enhanced Contactless
+                     * Polling (ECP v1), "VAS only" frame. Sent when no NFC-A device
+                     * answered so that iPhones in proximity wake up Apple Wallet.
+                     * No response is expected: transmit only (rxBuf == NULL), which
+                     * blocks only for the ~0.7ms frame duration. CRC_A is included
+                     * in the frame (0xE4 0xD2), hence CRC_TX_MANUAL. Errors are
+                     * deliberately ignored, ECP is best-effort. */
+                    static const uint8_t ecpVasOnlyFrame[] = { 0x6AU, 0x01U, 0x00U, 0x00U, 0x02U, 0xE4U, 0xD2U };
+                    (void)rfalTransceiveBlockingTxRx( (uint8_t*)ecpVasOnlyFrame, (uint16_t)sizeof(ecpVasOnlyFrame), NULL, 0U, NULL,
+                                                      ((uint32_t)RFAL_TXRX_FLAGS_DEFAULT | (uint32_t)RFAL_TXRX_FLAGS_CRC_TX_MANUAL), RFAL_FWT_NONE );
                 }
-
+            #endif /* RFAL_FEATURE_APPLE_ECP */
+                
                 gNfcDev.isTechInit = false;
                 gNfcDev.techs2do  &= ~RFAL_NFC_POLL_TECH_A;
             }

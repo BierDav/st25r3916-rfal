@@ -1,58 +1,45 @@
-use crate::rfal::rfalNfcWorker;
-use crate::RfalError;
+//! How RFAL's worker function gets driven.
 
-/// A platform's strategy for repeatedly driving RFAL's worker function until
-/// told to stop. Implementations decide their own mechanism: a dedicated OS
-/// thread, a timer interrupt, a cooperative scheduler slot, an async task —
-/// whatever fits the platform. `lib.rs` has no opinion on which.
+use crate::RfalError;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use core::sync::atomic::AtomicBool;
+
+/// A platform's way of calling RFAL's worker function over and over until
+/// told to stop: a dedicated OS thread, an RTOS task, a timer, an async task…
 ///
-/// # Safety and Context Constraints
+/// The `worker_fn` passed to [`spawn`](Self::spawn) runs one iteration of
+/// `rfalNfcWorker()` under the RFAL lock, and it invokes the
+/// `on_state_change` callback of [`RfalDiscoveryConfig`](crate::RfalDiscoveryConfig).
+/// The callback therefore runs in whatever context the driver uses. If that
+/// is an interrupt handler, the callback must not block or allocate (unless
+/// the allocator is interrupt-safe) and must return quickly.
 ///
-/// The `worker_fn` passed to `spawn` will trigger state change callbacks
-/// (specifically the `on_state_change` closure configured in [`RfalDiscoveryConfig`]).
-/// Consequently, the execution context of `worker_fn` determines the execution
-/// context of the user's callbacks.
-///
-/// If a driver implementation runs `worker_fn` in a restricted context (such as
-/// a hardware interrupt handler / ISR), the user's callback will also run in that
-/// context. This places strict constraints on the callback implementation:
-/// - It must not block or sleep.
-/// - It must not allocate memory unless the allocator is interrupt-safe.
-/// - It must complete execution as quickly as possible.
-///
-/// Future driver implementers and users must take care to align callback logic
-/// with the constraints of the execution context provided by the driver.
+/// Call `worker_fn` every few milliseconds; RFAL's timing (guard times,
+/// discovery durations) assumes it is serviced frequently.
 pub trait WorkerDriver: Send + Sync {
-    /// Start driving `worker_fn` repeatedly. Must not block — this should
-    /// return as soon as the driving mechanism is set up (e.g. immediately
-    /// after spawning a thread/task), not run the loop itself on the calling
-    /// thread. `should_continue` is a shared flag the driver's loop must
-    /// check each iteration; when it becomes `false` the loop must exit on
-    /// its own (the driver does not need to enforce this — `stop()` reads it
-    /// via the returned handle instead, see below).
+    /// Start calling `worker_fn` repeatedly. Must not block: return once the
+    /// mechanism is set up (e.g. right after spawning a thread). The loop must
+    /// stop on its own once `should_continue` becomes `false`.
     fn spawn(
         &self,
         worker_fn: fn(),
-        should_continue: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
-    ) -> Result<alloc::boxed::Box<dyn WorkerHandle>, RfalError>;
+        should_continue: Arc<AtomicBool>,
+    ) -> Result<Box<dyn WorkerHandle>, RfalError>;
 }
 
-/// A handle to a running worker-driving mechanism, returned by
-/// [`WorkerDriver::spawn`]. `NfcReader::stop()` calls `join` on this to
-/// block until the mechanism has actually quiesced before deinitializing
-/// RFAL — this ordering guarantee must hold for every implementation, not
-/// just the ESP-IDF one, since `stop()`'s safety (no use of RFAL state
-/// after deinit) depends on it.
+/// Handle to a running worker mechanism, returned by [`WorkerDriver::spawn`].
 pub trait WorkerHandle: Send + Sync {
-    /// Block until the driving mechanism has fully stopped. Must only
-    /// return after the last in-flight call into `worker_fn` has completed
-    /// — there must be no window where `join()` has returned but `worker_fn`
-    /// could still be invoked again afterward.
-    fn join(self: alloc::boxed::Box<Self>);
+    /// Block until the mechanism has fully stopped: after `join` returns,
+    /// `worker_fn` must not be running and must never be called again.
+    /// [`NfcReader::stop`](crate::NfcReader::stop) relies on this before it
+    /// deinitialises RFAL and releases the buffers RFAL points into.
+    fn join(self: Box<Self>);
 }
 
-pub fn worker_trampoline() {
-    unsafe {
-        rfalNfcWorker();
-    }
+/// One worker iteration under the RFAL lock.
+pub(crate) fn worker_trampoline() {
+    // SAFETY: rfalNfcWorker has no preconditions besides serialisation,
+    // which the lock provides.
+    crate::lock::with_lock(|| unsafe { crate::rfal::rfalNfcWorker() });
 }

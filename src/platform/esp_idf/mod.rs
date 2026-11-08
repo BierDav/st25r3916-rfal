@@ -1,13 +1,21 @@
-pub mod callbacks;
+//! ESP-IDF platform layer: implements the RFAL platform hooks on top of
+//! `esp-idf-hal` (SPI device, CS/IRQ GPIOs, `std::time` timers, a recursive
+//! FreeRTOS mutex) and drives RFAL from a std thread.
+#![allow(missing_debug_implementations)] // bon-generated builder
+
 pub mod builder;
+pub mod callbacks;
 
-pub use builder::{NfcReaderBuilder};
+pub use builder::NfcReaderBuilder;
 
-use crate::{WorkerDriver, WorkerHandle, RfalError};
+use crate::{RfalError, WorkerDriver, WorkerHandle};
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
-use alloc::boxed::Box;
 
+/// [`WorkerDriver`] running RFAL's worker on a std thread (`rfal_worker`,
+/// 4 KiB stack) every millisecond.
+#[derive(Debug, Default, Clone, Copy)]
 pub struct EspIdfWorkerDriver;
 
 impl WorkerDriver for EspIdfWorkerDriver {
