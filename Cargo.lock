@@ -1280,6 +1280,7 @@ dependencies = [
  "bindgen 0.72.1",
  "bon",
  "cc",
+ "critical-section",
  "embedded-hal 1.0.0",
  "esp-idf-hal",
  "esp-idf-svc",

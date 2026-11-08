@@ -37,6 +37,42 @@ pub trait WorkerHandle: Send + Sync {
     fn join(self: Box<Self>);
 }
 
+/// [`WorkerDriver`] that runs nothing in the background: you drive RFAL
+/// yourself by calling [`NfcReader::worker`](crate::NfcReader::worker) every
+/// few milliseconds, e.g. from a bare-metal super-loop.
+///
+/// The state callback then runs inside `worker()`, in your context. Since
+/// there is no background activity, [`NfcReader::stop`](crate::NfcReader::stop)
+/// never waits.
+///
+/// ```rust,ignore
+/// let mut reader = NfcReader::new(Box::new(ManualWorkerDriver));
+/// reader.start()?;
+/// reader.start_discovery(config)?;
+/// loop {
+///     reader.worker(); // one rfalNfcWorker() iteration
+///     // ... other work, at most a few ms per iteration ...
+/// }
+/// ```
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ManualWorkerDriver;
+
+impl WorkerDriver for ManualWorkerDriver {
+    fn spawn(
+        &self,
+        _worker_fn: fn(),
+        _should_continue: Arc<AtomicBool>,
+    ) -> Result<Box<dyn WorkerHandle>, RfalError> {
+        Ok(Box::new(ManualWorkerHandle))
+    }
+}
+
+struct ManualWorkerHandle;
+
+impl WorkerHandle for ManualWorkerHandle {
+    fn join(self: Box<Self>) {}
+}
+
 /// One worker iteration under the RFAL lock.
 pub(crate) fn worker_trampoline() {
     // SAFETY: rfalNfcWorker has no preconditions besides serialisation,

@@ -4,8 +4,9 @@ Safe Rust wrapper around STMicroelectronics' **RFAL v4.0.2** (RF Abstraction
 Layer) C library for the **ST25R3916** and **ST25R3916B** NFC reader ICs.
 
 - `no_std` + `alloc`, platform independent: you provide a handful of C-ABI
-  platform hooks (SPI, IRQ line, timers, locks); a ready-made ESP-IDF
-  implementation is included (feature `esp-idf`).
+  platform hooks (SPI, IRQ line, timers, locks), or use a ready-made
+  implementation: portable on top of embedded-hal 1.0 (feature
+  `embedded-hal`) or for ESP-IDF (feature `esp-idf`).
 - The vendored RFAL sources are compiled by `build.rs` (`cc`) and the bindings
   are generated at build time (`bindgen`). **You need a C compiler for your
   target and libclang.**
@@ -65,6 +66,48 @@ With `dev_limit > 1` and a state callback, RFAL stops in
 Raw bindings for anything not wrapped yet are in `st25r3916_rfal::ffi`; hold
 an `ffi::RfalLock` while calling them on a started reader.
 
+### Bare metal with embedded-hal (STM32, nRF, RP2350, ...)
+
+Feature `embedded-hal` implements the whole platform contract on top of
+embedded-hal 1.0 and [`critical-section`](https://docs.rs/critical-section):
+
+```rust,ignore
+use st25r3916_rfal::platform::embedded_hal::{EmbeddedHalPlatform, IrqMode};
+
+let mut reader = EmbeddedHalPlatform::builder()
+    .spi(spi)     // embedded_hal::spi::SpiDevice (owns CS), SPI mode 1
+    .irq(irq)     // embedded_hal::digital::InputPin, the chip's IRQ line
+    .delay(delay) // embedded_hal::delay::DelayNs
+    .clock(|| monotonic_millis()) // any `Fn() -> u32 + Send` (or impl `Clock`)
+    // optional: .irq_mode(IrqMode::Interrupt), .driver(..)
+    .install()?;
+reader.start()?;
+reader.start_discovery(config)?;
+loop {
+    reader.worker(); // the default `ManualWorkerDriver` runs nothing by itself
+    // ... other work, a few ms per iteration at most ...
+}
+```
+
+- **SPI:** with this feature RFAL is built with ST's `ST25R_COM_SINGLETXRX`
+  option, so every chip-select window is exactly one `SpiDevice` transaction
+  (frames of at most 513 bytes).
+- **IRQ:** by default (`IrqMode::Poll`) the IRQ pin is polled whenever RFAL
+  polls a timer or is entered. With `IrqMode::Interrupt`, call
+  `st25r3916_rfal::platform::embedded_hal::on_irq()` from the pin's
+  rising-edge interrupt handler instead.
+- **Locks:** SPI frames and the IRQ status run inside a (re-entrant)
+  critical section; the RFAL lock is a non-blocking counter, so use the reader
+  from one execution context only (e.g. the main loop). For an RTOS with
+  several threads, write your own hooks with a recursive mutex.
+- **Timers:** handle = expiry timestamp, wrapping arithmetic, no allocation.
+- You need a `critical-section` implementation (e.g. `cortex-m` with
+  `critical-section-single-core`; reference it with `use cortex_m as _;`) and
+  a global allocator. Targets without atomic compare-and-swap (`thumbv6m`)
+  are not supported.
+
+See the `platform::embedded_hal` module docs for details.
+
 ### ESP-IDF
 
 ```rust,ignore
@@ -91,6 +134,7 @@ reader.start()?;
 | `st25r3916b` | ✔ | Build RFAL for the ST25R3916B. |
 | `st25r3916` | | Build for the ST25R3916 (`default-features = false`). Mutually exclusive with `st25r3916b`; if both end up enabled, ST25R3916B is used and a build warning is printed. |
 | `log` | | Diagnostics through the `log` facade. |
+| `embedded-hal` | | Portable platform hooks on embedded-hal 1.0 + `critical-section`, `EmbeddedHalPlatform::builder`. Builds RFAL with `ST25R_COM_SINGLETXRX`. Mutually exclusive with `esp-idf` on ESP-IDF targets (compile error). |
 | `esp-idf` | | ESP-IDF platform hooks, worker thread and `NfcReader::builder` (only on `target_os = "espidf"`, no effect elsewhere). Implies `log`. |
 | `apple-ecp` | | RFAL patch: send an Apple ECP "VAS only" frame whenever NFC-A detection finds nothing (wakes Apple Wallet). |
 | `force-wupa` | | RFAL patch: always WUPA instead of REQA for NFC-A detection. |
@@ -103,7 +147,8 @@ The RFAL patches are not NFC Forum compliant; see
 
 The final binary must export these functions with C linkage, e.g.
 `#[no_mangle] pub extern "C" fn platformDelay(ms: u32) { ... }`. They are
-declared in [`src/c/rfal_platform.h`](src/c/rfal_platform.h).
+declared in [`src/c/rfal_platform.h`](src/c/rfal_platform.h). The
+`embedded-hal` and `esp-idf` features provide all of them.
 
 | Function | C signature | Notes |
 |---|---|---|
@@ -130,6 +175,8 @@ its `spawn` must start calling the given function every few milliseconds
 (thread, RTOS task, timer, ...) until the shared flag turns `false`, and the
 returned `WorkerHandle::join` must block until it has stopped. The state
 callback runs in that context.
+With `ManualWorkerDriver` nothing runs in the background; call
+`reader.worker()` yourself every few milliseconds (bare-metal super-loop).
 
 ## Building / cross-compiling
 

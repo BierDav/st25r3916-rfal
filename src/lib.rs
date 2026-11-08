@@ -7,9 +7,10 @@
 //! the `cc` crate; the Rust bindings are generated with `bindgen` at build
 //! time. The crate is `no_std` (it needs `alloc`) and platform independent:
 //! the hardware access (SPI, IRQ line, timers, locking) is provided by the
-//! application through a small set of C-ABI functions, listed below. An
-//! optional ready-made ESP-IDF implementation lives in `platform::esp_idf`
-//! (feature `esp-idf`).
+//! application through a small set of C-ABI functions, listed below. Two
+//! optional ready-made implementations exist: a portable one on top of
+//! embedded-hal 1.0 in `platform::embedded_hal` (feature `embedded-hal`) and
+//! an ESP-IDF one in `platform::esp_idf` (feature `esp-idf`).
 //!
 //! ## Usage
 //!
@@ -40,8 +41,9 @@
 //! ## Platform contract
 //!
 //! The final binary must export the following functions with C linkage
-//! (`#[no_mangle] pub extern "C" fn ...` in Rust). The `esp-idf` feature
-//! provides all of them on ESP-IDF; on any other platform you implement them.
+//! (`#[no_mangle] pub extern "C" fn ...` in Rust). The `embedded-hal` feature
+//! provides all of them for any embedded-hal 1.0 HAL, the `esp-idf` feature on
+//! ESP-IDF; otherwise you implement them.
 //!
 //! | Function | C signature | Notes |
 //! |---|---|---|
@@ -86,6 +88,7 @@
 //! | `st25r3916b` | yes | Build RFAL for the ST25R3916B. |
 //! | `st25r3916` | no | Build RFAL for the ST25R3916 (disable default features). Mutually exclusive with `st25r3916b`; if both are on, ST25R3916B wins with a warning. |
 //! | `log` | no | Emit warnings through the `log` facade. |
+//! | `embedded-hal` | no | Portable platform layer on embedded-hal 1.0 + `critical-section` (`platform::embedded_hal`, `EmbeddedHalPlatform::builder`). Not together with `esp-idf` on ESP-IDF targets. |
 //! | `esp-idf` | no | ESP-IDF platform layer + `NfcReader::builder` (only on `target_os = "espidf"`; implies `log`). |
 //! | `apple-ecp` | no | Opt-in RFAL patch: send an Apple ECP "VAS only" frame when NFC-A detection finds nothing. |
 //! | `force-wupa` | no | Opt-in RFAL patch: always use WUPA instead of REQA for NFC-A detection. |
@@ -116,7 +119,7 @@ pub mod worker;
 mod tests;
 
 pub use lib_types::*;
-pub use worker::{WorkerDriver, WorkerHandle};
+pub use worker::{ManualWorkerDriver, WorkerDriver, WorkerHandle};
 
 /// Raw RFAL bindings for functionality the safe API does not cover.
 ///
@@ -420,11 +423,12 @@ impl NfcReader {
 
     /// Run one iteration of RFAL's worker by hand.
     ///
-    /// Not needed normally: [`start`](Self::start) spawns a background worker
-    /// that does this. This is an escape hatch for platforms whose
-    /// [`WorkerDriver`] does nothing (e.g. a super-loop that calls `worker()`
-    /// itself). Calling it while the background worker runs is safe (both
-    /// are serialised by [`ffi::RfalLock`]) but pointless.
+    /// Not needed with a background [`WorkerDriver`] (thread, task, timer).
+    /// With [`ManualWorkerDriver`] (e.g. a bare-metal super-loop) this is how
+    /// RFAL makes progress: call it every few milliseconds while the reader is
+    /// started. Calling it while a background worker runs is safe (both are
+    /// serialised by [`ffi::RfalLock`]) but pointless. A no-op if the reader
+    /// is not started.
     pub fn worker(&mut self) {
         if self.started {
             worker::worker_trampoline();

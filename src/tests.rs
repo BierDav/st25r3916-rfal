@@ -1,6 +1,9 @@
 //! Host unit tests. The RFAL C code is linked in, so this module also
 //! provides stub platform hooks emulating a board with no chip attached
-//! (SPI reads return zeros, timers expire immediately).
+//! (SPI reads return zeros, timers expire immediately). With the
+//! `embedded-hal` feature the platform module provides the hooks instead
+//! (behaving the same while nothing is installed), and `embedded_hal_platform`
+//! drives it against a simulated chip.
 
 extern crate std;
 
@@ -9,6 +12,32 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
+/// RFAL's state and the platform are global: tests that call into RFAL hold
+/// this lock.
+static RFAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn rfal_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    RFAL_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Current nesting depth of `platformProtectWorker`.
+#[cfg(not(feature = "embedded-hal"))]
+fn lock_depth() -> i32 {
+    stubs::LOCK_DEPTH.load(Ordering::SeqCst)
+}
+
+/// Current nesting depth of `platformProtectWorker`.
+#[cfg(feature = "embedded-hal")]
+fn lock_depth() -> i32 {
+    crate::platform::embedded_hal::test_support::worker_depth() as i32
+}
+
+#[cfg(feature = "embedded-hal")]
+mod embedded_hal_platform;
+
+#[cfg(not(feature = "embedded-hal"))]
 mod stubs {
     use core::sync::atomic::{AtomicI32, Ordering};
 
@@ -201,9 +230,13 @@ fn discovery_config_defaults() {
     assert!(cfg.on_state_change.is_some());
 }
 
-/// The only test that calls into RFAL (RFAL state is global).
+/// Calls into RFAL with no chip attached.
 #[test]
 fn reader_lifecycle_without_chip() {
+    let _lock = rfal_test_lock();
+    #[cfg(feature = "embedded-hal")]
+    crate::platform::embedded_hal::EmbeddedHalPlatform::uninstall().unwrap();
+
     let spawned = Arc::new(AtomicI32::new(0));
     let mut reader = NfcReader::new(Box::new(CountingDriver(spawned.clone())));
 
@@ -232,16 +265,12 @@ fn reader_lifecycle_without_chip() {
     assert_ne!(err, RfalError::None);
     assert!(!reader.is_started());
     assert_eq!(spawned.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        stubs::LOCK_DEPTH.load(Ordering::SeqCst),
-        0,
-        "unbalanced RFAL lock"
-    );
+    assert_eq!(lock_depth(), 0, "unbalanced RFAL lock");
 
     // A failed start releases the global "started" claim.
     let mut other = NfcReader::new(Box::new(CountingDriver(spawned.clone())));
     assert_ne!(other.start(), Err(RfalError::WrongState));
     drop(other);
     drop(reader);
-    assert_eq!(stubs::LOCK_DEPTH.load(Ordering::SeqCst), 0);
+    assert_eq!(lock_depth(), 0);
 }

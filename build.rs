@@ -145,6 +145,13 @@ fn c_defines() -> Vec<(&'static str, &'static str)> {
             defines.push((define, "1"));
         }
     }
+    // The embedded-hal platform maps each chip-select window onto one
+    // `SpiDevice` transaction, so RFAL must issue exactly one
+    // `platformSpiTxRx` per select/deselect. ST's "single TxRx" mode does that
+    // by assembling every frame (command + data) in a 513 byte buffer first.
+    if feature("embedded-hal") {
+        defines.push(("ST25R_COM_SINGLETXRX", "1"));
+    }
     defines
 }
 
