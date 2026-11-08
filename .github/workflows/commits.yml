@@ -1,0 +1,82 @@
+name: Commit messages
+
+# Pushed and proposed commits follow Conventional Commits, which release
+# versions and notes are computed from (see cliff.toml). Only the commits of
+# the push or pull request are checked; older history is left alone.
+
+on:
+  push:
+  pull_request:
+    # `edited` re-checks a changed title.
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commits-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # A pull request is checked by its base's linter, so it cannot relax the
+      # rules it is checked by. Falls back to the checked-out one when the base
+      # has none yet.
+      - name: Select the linter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          lint="$RUNNER_TEMP/commitlint"
+          if [ -n "${BASE_SHA}" ] && git cat-file -e "${BASE_SHA}:scripts/commitlint" 2>/dev/null; then
+            git show "${BASE_SHA}:scripts/commitlint" > "${lint}"
+          else
+            cp scripts/commitlint "${lint}"
+          fi
+          chmod +x "${lint}"
+
+      - name: Check the pull request title
+        if: github.event_name == 'pull_request'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          # A squash merge uses the title as the commit header.
+          printf '%s\n' "${TITLE}" | "$RUNNER_TEMP/commitlint" - 2>&1 \
+            | sed 's/^commitlint: stdin/commitlint: pull request title/'
+
+      - name: Check the commit messages
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          CREATED: ${{ github.event.created }}
+        run: |
+          set -euo pipefail
+          zero=0000000000000000000000000000000000000000
+          if [ "${EVENT}" = pull_request ]; then
+            range="${BASE_SHA}..${HEAD_SHA}"
+          elif [ "${AFTER}" = "${zero}" ]; then
+            echo "A deleted ref has no commits to check."
+            exit 0
+          elif [ "${CREATED}" = true ] || [ "${BEFORE}" = "${zero}" ] \
+              || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            # A new branch (or the first push of the repository) would otherwise
+            # lint all of its history; only its head commit is checked.
+            range="${AFTER}^!"
+          else
+            # Commits a force push dropped are not reachable from AFTER, so
+            # this lists only what the push added.
+            range="${BEFORE}..${AFTER}"
+          fi
+          echo "Checking ${range}"
+          "$RUNNER_TEMP/commitlint" --range "${range}"

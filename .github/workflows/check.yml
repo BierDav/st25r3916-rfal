@@ -1,0 +1,241 @@
+name: Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The release workflow runs these checks before it publishes.
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A newer push or PR update supersedes a running check. A release's call runs
+# under the caller's event (workflow_dispatch), so it is never cancelled here.
+concurrency:
+  group: check-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+# The stable toolchain is pinned per job as `dtolnay/rust-toolchain@1.99.0`;
+# Dependabot proposes updates to the pin.
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  host:
+    # Clippy and tests on the host for every supported feature combination.
+    # `--all-features` is not meaningful: the chip variants are mutually
+    # exclusive and `esp-idf` only builds for ESP-IDF targets.
+    name: Host (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            args: ""
+          - name: log
+            args: --features log
+          - name: st25r3916
+            args: --no-default-features --features st25r3916
+          - name: embedded-hal
+            args: --features embedded-hal
+            # Skipped (with a notice) until Cargo.toml declares this feature.
+            requires: embedded-hal
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: clippy
+      - name: Install libclang for bindgen
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
+      - name: Check that the feature is declared
+        id: feature
+        env:
+          REQUIRES: ${{ matrix.requires }}
+        run: |
+          set -euo pipefail
+          run=true
+          if [ -n "${REQUIRES}" ] && ! cargo metadata --no-deps --format-version 1 \
+              | jq -e --arg f "${REQUIRES}" '.packages[0].features | has($f)' > /dev/null; then
+            echo "::notice::Cargo.toml has no '${REQUIRES}' feature yet; skipping this combination."
+            run=false
+          fi
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2
+        if: steps.feature.outputs.run == 'true'
+        with:
+          key: host-${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Clippy
+        if: steps.feature.outputs.run == 'true'
+        run: cargo clippy --locked --all-targets ${{ matrix.args }} -- -D warnings
+      - name: Test
+        if: steps.feature.outputs.run == 'true'
+        run: cargo test --locked ${{ matrix.args }}
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          set -euo pipefail
+          version=$(sed -n '/^\[package\]/,/^\[/{s/^rust-version *= *"\([^"]*\)".*/\1/p;}' Cargo.toml | head -n 1)
+          if [ -z "${version}" ]; then
+            echo "::notice::Cargo.toml declares no rust-version; skipping the MSRV check."
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        if: steps.msrv.outputs.version != ''
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: Install libclang for bindgen
+        if: steps.msrv.outputs.version != ''
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
+      - uses: Swatinem/rust-cache@v2
+        if: steps.msrv.outputs.version != ''
+        with:
+          key: msrv
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check with the MSRV toolchain
+        if: steps.msrv.outputs.version != ''
+        env:
+          # Newer lints are not the MSRV's concern.
+          RUSTFLAGS: ""
+        run: cargo check --locked
+
+  cross:
+    # Bare-metal targets: bindgen against the target's libc headers and, when
+    # the crate declares `compile-c`, the RFAL C sources with the GNU cross
+    # compiler `cc` picks by default.
+    name: Cross (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: thumbv7em-none-eabihf
+            packages: gcc-arm-none-eabi libnewlib-arm-none-eabi
+            include_dir: /usr/lib/arm-none-eabi/include
+          - target: riscv32imac-unknown-none-elf
+            # cc finds riscv64-unknown-elf-gcc for riscv32 targets and passes
+            # -march/-mabi; compiling (not linking) needs no rv32 multilib.
+            # TODO(verify on first CI run): if this C cross build proves
+            # impractical, set `RFAL_SKIP_C_BUILD: "1"` for this entry (the
+            # escape hatch build.rs is gaining) to keep the bindgen coverage.
+            packages: gcc-riscv64-unknown-elf picolibc-riscv64-unknown-elf
+            include_dir: /usr/lib/picolibc/riscv64-unknown-elf/include
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install the cross compiler, libc headers and libclang
+        env:
+          PACKAGES: ${{ matrix.packages }}
+          INCLUDE_DIR: ${{ matrix.include_dir }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # shellcheck disable=SC2086 # a space-separated package list
+          sudo apt-get install -y --no-install-recommends libclang-dev ${PACKAGES}
+          test -f "${INCLUDE_DIR}/string.h" || { echo "::error::no libc headers in ${INCLUDE_DIR}"; exit 1; }
+      - name: Point bindgen and cc at the libc headers
+        env:
+          TARGET: ${{ matrix.target }}
+          INCLUDE_DIR: ${{ matrix.include_dir }}
+        run: |
+          set -euo pipefail
+          triple=$(printf '%s' "${TARGET}" | tr '-' '_')
+          {
+            echo "BINDGEN_EXTRA_CLANG_ARGS_${triple}=-I${INCLUDE_DIR}"
+            echo "CFLAGS_${triple}=-I${INCLUDE_DIR}"
+          } >> "$GITHUB_ENV"
+      - name: Select the features
+        id: features
+        run: |
+          set -euo pipefail
+          if cargo metadata --no-deps --format-version 1 \
+              | jq -e '.packages[0].features | has("compile-c")' > /dev/null; then
+            echo "args=--features compile-c" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build
+        run: cargo build --locked --target ${{ matrix.target }} ${{ steps.features.outputs.args }}
+      - name: Build with log
+        run: cargo build --locked --target ${{ matrix.target }} --features log ${{ steps.features.outputs.args }}
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Builds the way docs.rs does (build.rs may skip the C toolchain there).
+      DOCS_RS: "1"
+      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Install libclang for bindgen
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo doc --locked --no-deps
+
+  package:
+    # What `cargo publish` would upload: packages, verifies the tarball builds
+    # on its own, and keeps it under crates.io's 10 MB limit.
+    name: Package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Install libclang for bindgen
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo publish --locked --dry-run
+      - name: Check the package size
+        run: |
+          set -euo pipefail
+          crate=$(ls target/package/*.crate)
+          size=$(stat -c %s "${crate}")
+          echo "${crate}: ${size} bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "${size}" -lt 10000000 ] || { echo "::error::the package exceeds crates.io's 10 MB limit"; exit 1; }
+
+  scripts:
+    name: Scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Shellcheck
+        run: shellcheck scripts/*

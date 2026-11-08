@@ -1,0 +1,50 @@
+#!/bin/sh
+# Prints the version the next release gets (without a leading `v`).
+#
+#   scripts/release-version [auto|patch|minor|major]
+#
+# - No release tag (vX.Y.Z) yet: the version in Cargo.toml, whatever the bump.
+# - auto: git-cliff's Conventional Commits bump since the last tag
+#   (0.x semantics from cliff.toml: breaking -> minor, anything else -> patch).
+# - patch|minor|major: that bump of the last tag.
+# A Cargo.toml version that is already ahead of the computed one wins, so a
+# manual bump in Cargo.toml is respected.
+#
+# Needs git-cliff and a clone with full history and tags.
+set -eu
+
+bump=${1:-auto}
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+semver='^[0-9]+\.[0-9]+\.[0-9]+$'
+
+manifest=$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\([^"]*\)".*/\1/p;}' Cargo.toml | head -n 1)
+printf '%s\n' "$manifest" | grep -Eq "$semver" || { echo "release-version: cannot read the version from Cargo.toml (got '$manifest')" >&2; exit 1; }
+
+latest=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1 || true)
+
+if [ -z "$latest" ]; then
+    echo "$manifest"
+    exit 0
+fi
+
+case "$bump" in
+auto)
+    next=$(git-cliff --config cliff.toml --bumped-version 2>/dev/null)
+    next=${next#v}
+    ;;
+patch) next=$(printf '%s\n' "$latest" | awk -F. '{ print $1 "." $2 "." $3 + 1 }') ;;
+minor) next=$(printf '%s\n' "$latest" | awk -F. '{ print $1 "." $2 + 1 ".0" }') ;;
+major) next=$(printf '%s\n' "$latest" | awk -F. '{ print $1 + 1 ".0.0" }') ;;
+*) echo "release-version: unknown bump '$bump' (auto|patch|minor|major)" >&2; exit 2 ;;
+esac
+
+printf '%s\n' "$next" | grep -Eq "$semver" || { echo "release-version: git-cliff proposed '$next'" >&2; exit 1; }
+if [ "$next" = "$latest" ]; then
+    echo "release-version: no releasable commits since v$latest" >&2
+    exit 1
+fi
+
+# The higher of the computed and the manifest version.
+printf '%s\n%s\n' "$next" "$manifest" | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1

@@ -1,0 +1,64 @@
+#!/bin/sh
+# Checks commit messages against Conventional Commits.
+#
+#   scripts/commitlint FILE            lint one message (`-` reads stdin)
+#   scripts/commitlint --range A..B    lint every non-merge commit in a git range
+#
+# Release versions are computed from these messages (see cliff.toml).
+set -eu
+
+types='feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert'
+header="^($types)(\\([a-z0-9][a-z0-9._/-]*\\))?!?: [^ ]"
+max_header=100
+# Messages git and GitHub generate themselves.
+generated='^(Merge |Revert ")'
+autosquash='^(fixup|squash|amend)! '
+
+# Prints the problem with the message on stdin, if any.
+problem() {
+    # Drop comment lines and leading blank lines.
+    message=$(grep -v '^#' | sed -e '/./,$!d')
+    first=$(printf '%s\n' "$message" | sed -n 1p)
+    if [ -z "$first" ]; then
+        echo "the message is empty"
+    elif printf '%s\n' "$first" | grep -Eq "$autosquash"; then
+        echo "fixup!/squash!/amend! commits must be squashed before they are pushed"
+    elif printf '%s\n' "$first" | grep -Eq "$generated"; then
+        :
+    elif ! printf '%s\n' "$first" | grep -Eq "$header"; then
+        echo "the header must be 'type(scope)!: description' with type one of ${types}"
+    elif [ "${#first}" -gt "$max_header" ]; then
+        echo "the header is ${#first} characters, more than $max_header"
+    elif printf '%s\n' "$first" | grep -Eq '[.[:space:]]$'; then
+        echo "the header must not end with a period or whitespace"
+    elif [ -n "$(printf '%s\n' "$message" | sed -n 2p)" ]; then
+        echo "the header must be followed by a blank line"
+    fi
+}
+
+report() { # label; message on stdin
+    found=$(problem)
+    [ -z "$found" ] && return 0
+    echo "commitlint: $1: $found" >&2
+    return 1
+}
+
+case "${1:-}" in
+--range)
+    range=${2:?usage: commitlint --range A..B}
+    failed=0
+    for sha in $(git rev-list --no-merges --reverse "$range"); do
+        git log -1 --format=%B "$sha" | report "$(git log -1 --format='%h %s' "$sha")" || failed=1
+    done
+    exit "$failed"
+    ;;
+'' | -h | --help)
+    sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+-) report "stdin" ;;
+*)
+    # shellcheck disable=SC2094 # the file name is only a label
+    report "$1" <"$1"
+    ;;
+esac
