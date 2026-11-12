@@ -53,8 +53,6 @@ jobs:
             args: --no-default-features --features st25r3916
           - name: embedded-hal
             args: --features embedded-hal
-            # Skipped (with a notice) until Cargo.toml declares this feature.
-            requires: embedded-hal
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.99.0
@@ -62,29 +60,13 @@ jobs:
           components: clippy
       - name: Install libclang for bindgen
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
-      - name: Check that the feature is declared
-        id: feature
-        env:
-          REQUIRES: ${{ matrix.requires }}
-        run: |
-          set -euo pipefail
-          run=true
-          if [ -n "${REQUIRES}" ] && ! cargo metadata --no-deps --format-version 1 \
-              | jq -e --arg f "${REQUIRES}" '.packages[0].features | has($f)' > /dev/null; then
-            echo "::notice::Cargo.toml has no '${REQUIRES}' feature yet; skipping this combination."
-            run=false
-          fi
-          echo "run=${run}" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
-        if: steps.feature.outputs.run == 'true'
         with:
           key: host-${{ matrix.name }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy
-        if: steps.feature.outputs.run == 'true'
         run: cargo clippy --locked --all-targets ${{ matrix.args }} -- -D warnings
       - name: Test
-        if: steps.feature.outputs.run == 'true'
         run: cargo test --locked ${{ matrix.args }}
 
   msrv:
@@ -119,7 +101,7 @@ jobs:
         env:
           # Newer lints are not the MSRV's concern.
           RUSTFLAGS: ""
-        run: cargo check --locked
+        run: cargo check --locked --features log,embedded-hal
       - name: Check with the MSRV toolchain and freshly resolved dependencies
         if: steps.msrv.outputs.version != ''
         env:
@@ -128,12 +110,11 @@ jobs:
         # dependencies still build with the declared rust-version.
         run: |
           rm Cargo.lock
-          cargo check
+          cargo check --features log,embedded-hal
 
   cross:
-    # Bare-metal targets: bindgen against the target's libc headers and, when
-    # the crate declares `compile-c`, the RFAL C sources with the GNU cross
-    # compiler `cc` picks by default.
+    # Bare-metal targets: bindgen against the target's libc headers and the
+    # RFAL C sources with the GNU cross compiler `cc` picks by default.
     name: Cross (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -147,9 +128,6 @@ jobs:
           - target: riscv32imac-unknown-none-elf
             # cc finds riscv64-unknown-elf-gcc for riscv32 targets and passes
             # -march/-mabi; compiling (not linking) needs no rv32 multilib.
-            # TODO(verify on first CI run): if this C cross build proves
-            # impractical, set `RFAL_SKIP_C_BUILD: "1"` for this entry (the
-            # escape hatch build.rs is gaining) to keep the bindgen coverage.
             packages: gcc-riscv64-unknown-elf picolibc-riscv64-unknown-elf
             include_dir: /usr/lib/picolibc/riscv64-unknown-elf/include
     steps:
@@ -178,26 +156,16 @@ jobs:
             echo "BINDGEN_EXTRA_CLANG_ARGS_${triple}=-I${INCLUDE_DIR}"
             echo "CFLAGS_${triple}=-I${INCLUDE_DIR}"
           } >> "$GITHUB_ENV"
-      - name: Select the features
-        id: features
-        run: |
-          set -euo pipefail
-          if cargo metadata --no-deps --format-version 1 \
-              | jq -e '.packages[0].features | has("compile-c")' > /dev/null; then
-            echo "args=--features compile-c" >> "$GITHUB_OUTPUT"
-          else
-            echo "args=" >> "$GITHUB_OUTPUT"
-          fi
       - uses: Swatinem/rust-cache@v2
         with:
           key: cross-${{ matrix.target }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
-        run: cargo build --locked --target ${{ matrix.target }} ${{ steps.features.outputs.args }}
+        run: cargo build --locked --target ${{ matrix.target }}
       - name: Build with log
-        run: cargo build --locked --target ${{ matrix.target }} --features log ${{ steps.features.outputs.args }}
+        run: cargo build --locked --target ${{ matrix.target }} --features log
       - name: Build with embedded-hal
-        run: cargo build --locked --target ${{ matrix.target }} --features log,embedded-hal ${{ steps.features.outputs.args }}
+        run: cargo build --locked --target ${{ matrix.target }} --features log,embedded-hal
 
   docs:
     name: Docs
