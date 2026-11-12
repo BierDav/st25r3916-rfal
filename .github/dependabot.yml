@@ -23,3 +23,7 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+    ignore:
+      # Pinned on purpose: the tag is the Rust version installed, and
+      # dtolnay/rust-toolchain has tags for releases that don't exist yet.
+      - dependency-name: dtolnay/rust-toolchain
