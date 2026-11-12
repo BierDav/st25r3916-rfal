@@ -203,6 +203,10 @@ The Rust wrapper (everything outside `rfal/`) is licensed under either of
 [Apache License 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your
 option.
 
-The vendored RFAL sources in `rfal/` are © STMicroelectronics, all rights
-reserved, and are redistributed under ST's license terms for use with ST25R
-devices; see [`rfal/LICENSE-ST.md`](rfal/LICENSE-ST.md).
+The vendored RFAL sources in `rfal/` are © STMicroelectronics and are **not**
+open source. They are redistributed under ST's **SLA0051** (MyLiberty)
+license; see [`rfal/LICENSE-ST.md`](rfal/LICENSE-ST.md) for the full text.
+Among other conditions, they **may only be used in combination with an
+STMicroelectronics NFC/UHF IC** (such as the ST25R3916/ST25R3916B), and
+binary redistributions outside a device's firmware must reproduce ST's notice
+and conditions. By using this crate you agree to those terms for `rfal/`.

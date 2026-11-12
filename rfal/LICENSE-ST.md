@@ -5,19 +5,81 @@ v4.0.2** (STSW-ST25RFAL004).
 
     COPYRIGHT 2016-2020 STMicroelectronics, all rights reserved
 
-They are **not** covered by the MIT / Apache-2.0 license of the
-`st25r3916-rfal` Rust crate. They are redistributed unmodified, except for
-the changes listed in [`MODIFICATIONS.md`](MODIFICATIONS.md), solely for use
-with STMicroelectronics ST25R NFC devices, under STMicroelectronics' license
-terms, which are available from
-<https://www.st.com/en/embedded-software/stsw-st25rfal004.html>.
+They are licensed by STMicroelectronics under the **SLA0051 (MyLiberty)
+Software License Agreement** reproduced below. They are **not** open source
+and are **not** covered by the MIT / Apache-2.0 license of the rest of the
+`st25r3916-rfal` crate. In particular (condition 4), they may only be used in
+combination with an NFC or UHF reader/tag IC manufactured by or for
+STMicroelectronics, such as the ST25R3916 / ST25R3916B.
 
-As stated in the source file headers: unless required by applicable law or
-agreed to in writing, the software is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied, AND
-SPECIFICALLY DISCLAIMING THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+They are redistributed unmodified, except for the changes listed in
+[`MODIFICATIONS.md`](MODIFICATIONS.md) (all opt-in through Cargo features).
 
 The platform configuration header used to build these sources
 (`src/c/rfal_platform.h`) and the freestanding `src/c/freestanding/string.h`
 shim are part of the Rust crate and licensed under MIT OR Apache-2.0.
+
+The license text below is copied verbatim from STMicroelectronics' own
+distribution (e.g. `Middlewares/ST/NDEF/LICENSE.md` in
+<https://github.com/STMicroelectronics/x-cube-nfc7>).
+
+---
+
+SLA0051 Rev2/May 2020
+
+
+### __SOFTWARE LICENSE AGREEMENT (“Agreement”)__ 
+
+BY CLICKING ON THE "I ACCEPT" BUTTON OR BY UNZIPPING, INSTALLING, COPYING, DOWNLOADING, ACCESSING
+OR OTHERWISE USING THIS SOFTWARE (HEREINAFTER “SOFTWARE” MEANS THE RELATED SOFTWARE,
+DOCUMENTATION, OTHER MATERIALS, AND ANY PARTS, PERMITTED MODIFICATIONS, AND PERMITTED
+DERIVATIVES THEREOF) FROM STMICROELECTRONICS INTERNATIONAL N.V, SWISS BRANCH AND/OR ITS
+AFFILIATED COMPANIES (“STMICROELECTRONICS”), THE RECIPIENT, ON BEHALF OF HIMSELF OR HERSELF, OR ON
+BEHALF OF ANY ENTITY BY WHICH SUCH RECIPIENT IS EMPLOYED AND/OR ENGAGED (“YOU”) AGREES TO BE
+BOUND BY THIS AGREEMENT.
+
+You represent that you have the authority to enter into this Agreement. You will comply with all laws, including export laws.
+STMicroelectronics’s failure or delay to enforce this Agreement does not waive STMicroelectronics’s rights. Swiss law, except
+conflict of laws, governs this Agreement, and the parties consent to exclusive jurisdiction of courts in Switzerland for litigation of
+this Agreement.
+
+Subject to the below disclaimer, the redistribution, reproduction and use in source and binary forms of the software or any part
+thereof, with or without modification, are permitted provided that the following conditions are met:
+1. Redistribution of source code (modified or not) must retain any copyright notice, this list of conditions and the following
+disclaimer.
+2. Redistributions in binary form, except as embedded into a microcontroller or microprocessor device or a software update
+for such device, must reproduce any copyright notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+3. Neither the name of STMicroelectronics nor the names of other contributors to this software may be used to endorse or
+promote products using or derived from this software or part thereof without specific written permission.
+4. This software or any part thereof, including modifications and/or derivative works of this software, must be used and
+execute solely and exclusively in combination with an integrated circuit that is manufactured by or for STMicroelectronics
+and is an NFC tag, NFC dynamic tag, NFC reader, or UHF reader.
+5. No use, reproduction or redistribution of this software may be done in any manner that would subject this software to any
+Open Source Terms. “Open Source Terms” shall mean any open source license which requires as part of distribution of
+software that the source code of such software is distributed therewith or otherwise made available, or open source license
+that substantially complies with the Open Source definition specified at www.opensource.org and any other comparable
+open source license such as for example GNU General Public License (GPL), Eclipse Public License (EPL), Apache
+Software License, BSD license and MIT license.
+6. STMicroelectronics has no obligation to provide any maintenance, support or updates for the software.
+7. The software is and will remain the exclusive property of STMicroelectronics and its licensors. The recipient will not take
+any action that jeopardizes STMicroelectronics and its licensors' proprietary rights or acquire any rights in the software,
+except the limited rights specified hereunder.
+8. Redistribution and use of this software partially or any part thereof other than as permitted under this license is void and
+will automatically terminate your rights under this license.
+
+__DISCLAIMER__
+
+THIS SOFTWARE IS PROVIDED BY STMICROELECTRONICS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS,
+IMPLIED OR STATUTORY WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT OF THIRD PARTY
+INTELLECTUAL PROPERTY RIGHTS ARE DISCLAIMED TO THE FULLEST EXTENT PERMITTED BY LAW. IN NO EVENT
+SHALL STMICROELECTRONICS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+OF SUCH DAMAGE.
+EXCEPT AS EXPRESSLY PERMITTED HEREUNDER, NO LICENSE OR OTHER RIGHTS, WHETHER EXPRESS OR
+IMPLIED, ARE GRANTED UNDER ANY PATENT OR OTHER INTELLECTUAL PROPERTY RIGHTS OF
+STMICROELECTRONICS OR ANY THIRD PARTY
