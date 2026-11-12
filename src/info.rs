@@ -80,10 +80,6 @@ impl DeviceInfo {
     /// member selected by `type_` and the `proto` member selected by
     /// `rfInterface` must be initialised. Reading another union member could
     /// hit invalid `bool` values.
-    #[allow(
-        dead_code,
-        reason = "WP3: unused until WP4's flows call it; remove the allow then"
-    )]
     pub(crate) unsafe fn from_raw(raw: &ffi::rfalNfcDevice) -> DeviceInfo {
         let rf_interface = RfInterface::from_raw(raw.rfInterface);
         let mut uid: &[u8] = &[];

@@ -170,10 +170,6 @@ impl DiscoveryConfig {
     /// Takes `self` by value (`DiscoveryConfig` is `Copy`; clippy's
     /// `wrong_self_convention`). Call it as `config.to_raw()`, also on a
     /// `&DiscoveryConfig`.
-    #[allow(
-        dead_code,
-        reason = "WP3: unused until WP4's discover flow calls it; remove the allow then"
-    )]
     pub(crate) fn to_raw(self) -> ffi::rfalNfcDiscoverParam {
         let mut p = rfal_default_disc_params();
         p.compMode = self.compliance.to_raw();

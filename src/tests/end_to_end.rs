@@ -402,21 +402,22 @@ fn t2t_read_returns_16_bytes() {
 }
 
 #[test]
-fn t2t_write_ack_is_an_incomplete_byte_of_4_bits() {
+fn t2t_write_ack_is_a_4_bit_response() {
     let _guard = rfal_test_lock();
     let board = board(Some(NfcATag::t2t(&UID7)));
     let mut r = reader(&board);
     let mut dev = discover(&mut r, &board, &config());
 
-    // A T2T ACK is 4 bits. Design §2.6/§3.4: `IncompleteByte(n)`, n = valid
-    // bits in the last byte. RFAL returns plain RFAL_ERR_INCOMPLETE_BYTE and
-    // reports the bit count in the received length (rxLen % 8).
-    let e = dev.blocking_transceive(&[0xA2, 5, 1, 2, 3, 4]).err();
-    assert_eq!(
-        e,
-        Some(Error::Rfal(RfalError::IncompleteByte(4))),
-        "a 4-bit T2T ACK must surface as IncompleteByte(4) (bits from rxLen, not the return code)"
-    );
+    // A T2T ACK is 4 bits. For RF-interface exchanges a partial last byte is
+    // not an error: the response carries the valid bits in the low bits of
+    // the last byte and `last_rx_bits` gives the exact count (RFAL reports
+    // RFAL_ERR_INCOMPLETE_BYTE with the bit count in rxLen).
+    let ack = dev
+        .blocking_transceive(&[0xA2, 5, 1, 2, 3, 4])
+        .expect("a 4-bit T2T ACK must be Ok, not an error")
+        .to_vec();
+    assert_eq!(ack, [0x0A], "the 4-bit ACK nibble, high bits cleared");
+    assert_eq!(dev.last_rx_bits(), 4, "exact bit count of the ACK");
     let data = dev
         .blocking_transceive(&[0x30, 5])
         .expect("READ 5")
