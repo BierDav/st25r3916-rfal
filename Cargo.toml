@@ -75,7 +75,7 @@ esp-idf-sys = { version = "0.37.2", optional = true }
 esp-idf-hal = { version = "0.46.2", optional = true }
 
 [build-dependencies]
-bindgen = { version = "0.72.1", features = ["prettyplease"] }
+bindgen = { version = "0.73.2", features = ["prettyplease"] }
 cc = "1.2"
 glob = "0.3.3"
 
