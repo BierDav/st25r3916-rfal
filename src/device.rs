@@ -1,5 +1,5 @@
-//! The session handle of an activated device and its flows (WP4; design §2.4,
-//! §3.4, §5).
+//! The session handle of an activated device and its flows (`transceive`,
+//! `deactivate`).
 //!
 //! # Soundness of the data exchange (re-check when RFAL is updated)
 //!
@@ -28,9 +28,8 @@
 //!   rounded up to bytes. A frame ending in a partial byte completes with
 //!   the plain `RFAL_ERR_INCOMPLETE_BYTE` and the total bit count in
 //!   `*rvdLen` (`rfal_rfst25r3916.c:1731`, `2577-2580`, status at `1734`,
-//!   `2503`); the RF flow
-//!   treats it as success (owner decision) and reports the bits through
-//!   `Device::last_rx_bits`.
+//!   `2503`); the RF flow treats it as success (a 4-bit T2T ACK/NAK is a
+//!   normal answer) and reports the bits through `Device::last_rx_bits`.
 //! - **`rfalNfcDataExchangeGetStatus` must only follow a started exchange:**
 //!   in `ACTIVATED` it unconditionally switches to `DATAEXCHANGE`
 //!   (`rfal_nfc.c:792-796`, meant for listen mode). So `in_flight` is set
@@ -255,8 +254,8 @@ impl<'r, P: Platform> Device<'r, P> {
         let rx = self.start(tx)?;
         let status = self.complete::<M>().await?;
         // RF frames ending in a partial byte (e.g. a 4-bit T2T ACK/NAK) are
-        // responses, not errors (owner decision); RFAL only ever reports the
-        // plain code with the bit count in `*rvdLen`, but accept the whole
+        // responses, not errors. RFAL only ever reports the plain code with
+        // the bit count in `*rvdLen`, but accept the whole
         // `RFAL_ERR_INCOMPLETE_BYTE[_0n]` range, as RFAL itself does
         // (`rfalIsIncompleteByteError`, `rfal_rfst25r3916.c:451`).
         let incomplete =
@@ -420,7 +419,8 @@ fn response_size(interface: ffi::rfalNfcRfInterface, raw_len: u16) -> (usize, us
     }
 }
 
-/// Eager, blocking deactivation (owner decision OQ4): see the type docs.
+/// Eager, blocking deactivation, so the field never stays on after a `Device`
+/// is gone: see the type docs.
 impl<P: Platform> Drop for Device<'_, P> {
     fn drop(&mut self) {
         if self.active

@@ -1,4 +1,4 @@
-//! What the reader knows about an activated device (WP3; design §2.5).
+//! What the reader knows about an activated device.
 //!
 //! Everything is copied out of RFAL's device list, so these are plain `Copy`
 //! values with no pointers into RFAL.
@@ -59,7 +59,7 @@ impl DeviceInfo {
 
     /// Copy the user-visible identity out of an RFAL device record.
     ///
-    /// Contract (WP3; used by WP4 for the active device and for every entry of
+    /// Contract (used for the active device and for every entry of
     /// `rfalNfcGetDevicesFound` when `Select::With` runs):
     /// - Reads only `raw.type_`, the `raw.dev` member that `type_` selects,
     ///   `raw.rfInterface`, and the `raw.proto` member that `rfInterface`

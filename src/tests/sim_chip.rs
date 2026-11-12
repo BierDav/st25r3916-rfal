@@ -630,7 +630,8 @@ pub(crate) struct Chip {
     pub now_ms: u32,
     /// How far each clock read advances the clock (so busy-waits end).
     pub ms_per_clock_read: u32,
-    /// The next this many SPI frames fail (not delivered to the chip).
+    /// The next this many SPI frames fail (not delivered to the chip);
+    /// `usize::MAX` is a broken bus.
     pub fail_next_spi_frames: usize,
     /// SPI frames that failed because of `fail_next_spi_frames`.
     pub spi_faults: usize,

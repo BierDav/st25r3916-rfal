@@ -3,8 +3,10 @@
 //! Covers the reader lifecycle, discovery of a T2T (4/7/10-byte UIDs) and an
 //! ISO-DEP T4T, `transceive` on both, deactivation (drop, blocking, async),
 //! the `NoDevice` timeout, async flows polled by hand with
-//! [`Waker::noop`], cancellation, SPI error injection, `with_raw`, and the
-//! same flows through [`Hal::new`] / [`Hal::new_async`].
+//! [`Waker::noop`], cancellation, how fast a timed-out or cancelled
+//! discovery returns, parameters RFAL rejects, SPI error injection (single
+//! frames and a broken bus), `with_raw`, and the same flows through
+//! [`Hal::new`] / [`Hal::new_async`].
 //!
 //! Every test takes [`rfal_test_lock`] first and ends with [`finish`], which
 //! checks what must hold after any run: no SPI transaction was split into
@@ -153,6 +155,29 @@ fn t2t_bytes(start: usize) -> Vec<u8> {
         .collect()
 }
 
+/// A discovery was stopped (timeout or cancellation) at `stopped_at`, with
+/// the field on, early in a 1000 ms round. The flow must turn the field off
+/// within about one step (`off_at`) and return (`done_at`) once the field
+/// has been off for RFAL's minimum tFIELD_OFF (5 ms).
+///
+/// RFAL itself keeps the field off until its round timer expires
+/// (`rfal_nfc.c:2307-2338`); the flows skip the rest of that wait by
+/// advancing RFAL's clock (`shim::skip_rfal_time`). Without that, `done_at`
+/// would be up to a round later.
+fn assert_field_off_promptly(stopped_at: u32, off_at: u32, done_at: u32) {
+    let off_after = off_at.wrapping_sub(stopped_at) as i32;
+    let off_for = done_at.wrapping_sub(off_at) as i32;
+    // About one step: the clock advances 1 ms per read.
+    assert!(
+        (0..=15).contains(&off_after),
+        "field off {off_after} ms after the stop"
+    );
+    assert!(
+        (5..30).contains(&off_for),
+        "field off for {off_for} ms before returning (tFIELD_OFF = 5 ms, not the rest of the round)"
+    );
+}
+
 /// The no-response timer value (64/fc steps) of the last transceive.
 fn nrt_64fc(board: &SharedChip) -> u32 {
     let chip = board.lock();
@@ -181,13 +206,19 @@ fn new_initialises_the_chip_and_drop_powers_it_down() {
         assert!(
             chip.frames
                 .iter()
-                .any(|f| f.first() == Some(&(0x40 | reg::IC_IDENTITY as u8))),
+                .any(|f| f.first() == Some(&(0x40 | reg::IC_IDENTITY as u8)) && f.len() == 2),
             "RFAL read the IC identity"
         );
         assert_ne!(
             chip.regs_a[reg::OP_CONTROL] & reg::OP_CONTROL_EN,
             0,
             "oscillator enabled after new"
+        );
+        assert!(
+            chip.frames
+                .iter()
+                .any(|f| f.first() == Some(&(0x40 | reg::IRQ_MAIN as u8)) && f.len() == 5),
+            "the raised IRQs were serviced: RFAL's ISR read all four IRQ registers in one frame"
         );
         assert!(!chip.field_on(), "new leaves the field off");
     }
@@ -338,8 +369,8 @@ fn blocking_discover_activates_a_t2t_with_a_7_byte_uid() {
             chip.field_on(),
             "the field stays on while a device is active"
         );
-        // Defaults (OQ2): NFC compliance mode sends SLP_REQ after REQA, and
-        // B, F and V are polled too.
+        // Defaults: NFC compliance mode sends SLP_REQ after REQA, and B, F
+        // and V are polled too.
         let sent = |first: u8| chip.rf_frames_starting_with(first) > 0;
         assert!(
             sent(0x26) && sent(0x50) && sent(0x52),
@@ -684,6 +715,10 @@ fn discover_times_out_with_no_device() {
         );
         assert!(chip.rf_frames_starting_with(0x26) > 0, "it polled (REQA)");
         assert!(!chip.field_on(), "NoDevice leaves the field off");
+        assert!(
+            chip.waits_blocking > 0 && chip.waits_async == 0,
+            "blocking_discover waits with wait_irq_blocking only"
+        );
     }
     assert_eq!(rfal_state(&mut r), ffi::rfalNfcState_RFAL_NFC_STATE_IDLE);
 
@@ -696,41 +731,59 @@ fn discover_times_out_with_no_device() {
     finish(&board);
 }
 
-/// The timeout hits during technology detection, with the field on. RFAL's
-/// `rfalNfcDeactivate(IDLE)` turns the field off at once but then keeps it
-/// off until the round (`DiscoveryConfig::round`) ends (`rfalNfcDeactivation`,
-/// rfal_nfc.c), so `NoDevice` comes at most one round late.
+/// The timeout hits during technology detection, with the field on, early
+/// in a 1000 ms round. RFAL's deactivation turns the field off at once but
+/// would keep it off until the round ends; both flavours return `NoDevice`
+/// a few ms after the timeout instead (see [`assert_field_off_promptly`]).
 #[test]
-fn discover_timeout_during_polling_turns_the_field_off_at_once() {
+fn discover_timeout_with_the_field_on_returns_promptly() {
+    const TIMEOUT_MS: u32 = 100;
     let _guard = rfal_test_lock();
-    let board = board(None);
-    let mut r = reader(&board);
-    let start = board.lock().now_ms;
-
+    // Polling A and B without a tag keeps the field on from about 20 ms to
+    // about 140 ms into the round.
     let cfg = DiscoveryConfig::new()
-        .with_round(Duration::from_millis(500))
-        .with_timeout(Duration::from_millis(50));
-    let res = r.blocking_discover(&cfg).map(|d| *d.info());
-    assert_eq!(res, Err(Error::NoDevice));
-    let chip = board.lock();
-    let elapsed = chip.now_ms.wrapping_sub(start);
-    let off = chip.last_field_off_ms.map(|t| t.wrapping_sub(start));
-    assert!(
-        chip.field_on_events > 0,
-        "the field was on when the timeout hit"
-    );
-    assert!(!chip.field_on(), "NoDevice leaves the field off");
-    assert!(
-        off.is_some_and(|t| (50..100).contains(&t)),
-        "field turned off {off:?} ms after the start, expected right after the 50 ms timeout"
-    );
-    assert!(
-        (50..600).contains(&elapsed),
-        "NoDevice after {elapsed} ms: timeout 50 ms plus at most the rest of a 500 ms round"
-    );
-    drop(chip);
-    drop(r);
-    finish(&board);
+        .with_poll(PollTech::A | PollTech::B)
+        .with_timeout(Duration::from_millis(TIMEOUT_MS as u64));
+    for blocking in [true, false] {
+        let board = board(None);
+        let mut r = reader(&board);
+        let start = board.lock().now_ms;
+
+        let res = if blocking {
+            r.blocking_discover(&cfg).map(|d| *d.info())
+        } else {
+            let mut fut = pin!(r.discover(&cfg));
+            let mut cx = Context::from_waker(Waker::noop());
+            let mut field_was_on = false;
+            let res = loop {
+                if let Poll::Ready(res) = fut.as_mut().poll(&mut cx) {
+                    break res.map(|d| *d.info());
+                }
+                let chip = board.lock();
+                field_was_on |=
+                    chip.field_on() && chip.now_ms.wrapping_sub(start) >= TIMEOUT_MS - 10;
+            };
+            assert!(field_was_on, "the field was on when the timeout hit");
+            res
+        };
+
+        assert_eq!(res, Err(Error::NoDevice), "blocking: {blocking}");
+        {
+            let chip = board.lock();
+            assert!(!chip.field_on(), "NoDevice leaves the field off");
+            let off_at = chip.last_field_off_ms.expect("the field went off");
+            assert_field_off_promptly(start.wrapping_add(TIMEOUT_MS), off_at, chip.now_ms);
+            if !blocking {
+                assert_eq!(
+                    chip.waits_blocking, 0,
+                    "async discover never blocks, also not while idling RFAL"
+                );
+            }
+        }
+        assert_eq!(rfal_state(&mut r), ffi::rfalNfcState_RFAL_NFC_STATE_IDLE);
+        drop(r);
+        finish(&board);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -768,7 +821,34 @@ fn async_discover_and_transceive_polled_by_hand() {
             "async flows never call wait_irq_blocking"
         );
     }
-    drop(dev); // blocking deactivation (OQ4)
+    drop(dev); // Device::drop deactivates, blocking
+    drop(r);
+    finish(&board);
+}
+
+/// Short rounds (50 ms, shorter than technology detection) and a 100 ms
+/// timeout, polled by hand: `NoDevice`, RFAL idle, and no blocking wait on
+/// the way, also not while idling RFAL after the timeout.
+#[test]
+fn async_discover_times_out_without_blocking() {
+    let _guard = rfal_test_lock();
+    let board = board(None);
+    let mut r = reader(&board);
+    let cfg = DiscoveryConfig::new()
+        .with_poll(PollTech::A | PollTech::B)
+        .with_round(Duration::from_millis(50))
+        .with_timeout(Duration::from_millis(100));
+
+    let (res, pendings) = poll_by_hand(r.discover(&cfg));
+    assert_eq!(res.map(|d| *d.info()), Err(Error::NoDevice));
+    assert!(pendings > 0, "discover yields between RFAL steps");
+    {
+        let chip = board.lock();
+        assert!(chip.waits_async > 0, "async discover waits with wait_irq");
+        assert_eq!(chip.waits_blocking, 0, "async discover never blocks");
+        assert!(!chip.field_on(), "NoDevice leaves the field off");
+    }
+    assert_eq!(rfal_state(&mut r), ffi::rfalNfcState_RFAL_NFC_STATE_IDLE);
     drop(r);
     finish(&board);
 }
@@ -805,6 +885,7 @@ fn cancelled_discover_turns_the_field_off_and_leaves_rfal_idle() {
     let board = board(None);
     let mut r = reader(&board);
     let cfg = DiscoveryConfig::new(); // no timeout: runs until cancelled
+    let dropped_at;
     {
         let mut fut = pin!(r.discover(&cfg));
         let mut cx = Context::from_waker(Waker::noop());
@@ -817,15 +898,32 @@ fn cancelled_discover_turns_the_field_off_and_leaves_rfal_idle() {
             polls += 1;
             assert!(polls < 100_000, "discover never turned the field on");
         }
-        // A few more steps into polling, then cancel.
+        assert!(
+            polls > 1,
+            "each poll runs at most one RFAL step, then yields"
+        );
+        // A few more steps into polling, then cancel, with the field on,
+        // early in the 1000 ms round.
         for _ in 0..10 {
             assert!(fut.as_mut().poll(&mut cx).is_pending());
         }
+        let chip = board.lock();
+        assert!(chip.field_on());
+        assert_eq!(chip.waits_blocking, 0);
+        dropped_at = chip.now_ms;
     }
-    assert!(
-        !board.lock().field_on(),
-        "dropping the discover future turns the field off"
-    );
+    {
+        let chip = board.lock();
+        assert!(
+            !chip.field_on(),
+            "dropping the discover future turns the field off"
+        );
+        let off_at = chip
+            .last_field_off_ms
+            .expect("the cancel guard turned the field off");
+        assert_field_off_promptly(dropped_at, off_at, chip.now_ms);
+        assert!(chip.waits_blocking > 0, "the cancel guard waits, blocking");
+    }
     assert_eq!(rfal_state(&mut r), ffi::rfalNfcState_RFAL_NFC_STATE_IDLE);
 
     board.lock().tag = Some(NfcATag::t2t(&UID7));
@@ -943,12 +1041,83 @@ fn spi_error_during_discover_is_a_platform_error() {
     finish(&board);
 }
 
+/// Every SPI frame fails until the bus recovers: raw calls and discovery
+/// fail with the platform error, yet RFAL's state machine still ends in
+/// `IDLE` (its deactivation runs on timers, reading zeros from the bus).
+#[test]
+fn a_broken_spi_bus_fails_the_flows_until_it_recovers() {
+    let _guard = rfal_test_lock();
+    let board = board(Some(NfcATag::t2t(&UID7)));
+    let mut r = reader(&board);
+    let broken = Error::Platform(PlatformError::Spi(ErrorKind::Other));
+    board.lock().fail_next_spi_frames = usize::MAX;
+
+    // SAFETY: switches the field off (it is off already).
+    assert_eq!(r.with_raw(|| unsafe { ffi::rfalFieldOff() }), Err(broken));
+    let cfg = DiscoveryConfig::new()
+        .with_poll(PollTech::A | PollTech::B)
+        .with_round(Duration::from_millis(50))
+        .with_timeout(Duration::from_millis(100));
+    assert_eq!(r.blocking_discover(&cfg).map(|d| *d.info()), Err(broken));
+    assert_eq!(rfal_state(&mut r), ffi::rfalNfcState_RFAL_NFC_STATE_IDLE);
+    {
+        let mut chip = board.lock();
+        assert!(chip.spi_faults > 1, "every frame failed");
+        assert!(chip.rf_log.is_empty(), "nothing reached the chip");
+        chip.fail_next_spi_frames = 0;
+    }
+
+    let dev = discover(&mut r, &board, &config());
+    assert_eq!(
+        dev.info().uid(),
+        UID7,
+        "the reader works again once the bus does"
+    );
+    drop(dev);
+    drop(r);
+    finish(&board);
+}
+
+#[test]
+fn invalid_discovery_parameters_are_rejected_and_rfal_stays_idle() {
+    let _guard = rfal_test_lock();
+    let board = board(Some(NfcATag::t2t(&UID7)));
+    let mut r = reader(&board);
+
+    // RFAL accepts 1..=5 devices per round; `rfalNfcDiscover` refuses 0
+    // before anything starts.
+    let cfg = DiscoveryConfig::new().with_device_limit(0);
+    let res = r.blocking_discover(&cfg).map(|d| *d.info());
+    assert_eq!(res, Err(Error::Rfal(RfalError::Param)));
+    assert_eq!(rfal_state(&mut r), ffi::rfalNfcState_RFAL_NFC_STATE_IDLE);
+    {
+        let chip = board.lock();
+        assert!(chip.rf_log.is_empty(), "nothing was sent");
+        assert_eq!(chip.field_on_events, 0, "the field stayed off");
+    }
+
+    let dev = discover(&mut r, &board, &config());
+    assert_eq!(
+        dev.info().uid(),
+        UID7,
+        "discover works with valid parameters"
+    );
+    drop(dev);
+    drop(r);
+    finish(&board);
+}
+
 #[test]
 fn with_raw_runs_ffi_with_the_platform_active() {
     let _guard = rfal_test_lock();
     let board = board(None);
     let mut r = reader(&board);
     assert_eq!(rfal_state(&mut r), ffi::rfalNfcState_RFAL_NFC_STATE_IDLE);
+    assert_eq!(
+        r.with_raw(|| 42),
+        Ok(42),
+        "with_raw returns the closure's result"
+    );
 
     let frames = board.lock().frames.len();
     // SAFETY: reads a chip register; no RFAL state changes.

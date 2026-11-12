@@ -1,8 +1,8 @@
 //! Host tests.
 //!
-//! - this file: the shared [`rfal_test_lock`], the error-code tests and a link
+//! - this file: the shared [`rfal_test_lock`], the error-code tests, a link
 //!   test proving that the RFAL C library and every `st25r3916_rfal_*` shim
-//!   are in the test binary;
+//!   are in the test binary, and (with `defmt`) a discarding global logger;
 //! - [`sim_chip`]: a simulated ST25R3916(B) with an NFC-A tag in its field
 //!   (T2T or ISO-DEP T4T), the [`sim_chip::SimPlatform`] and embedded-hal
 //!   parts that drive it, and [`sim_chip::NoChip`] (a board without a chip);
@@ -18,12 +18,31 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use crate::error::check;
 use crate::{Error, PlatformError, RfalError, ffi};
 
-mod flows;
+/// With feature `defmt`, the crate's log calls reference defmt's global
+/// logger, so the test binary needs one to link. This one discards
+/// everything. Exactly one may exist in the test build.
+#[cfg(feature = "defmt")]
+mod defmt_sink {
+    #[defmt::global_logger]
+    struct Discard;
+
+    // SAFETY: every method is a no-op, so there is no state to protect and
+    // nothing can be re-entered.
+    unsafe impl defmt::Logger for Discard {
+        fn acquire() {}
+        unsafe fn flush() {}
+        unsafe fn release() {}
+        unsafe fn write(_bytes: &[u8]) {}
+    }
+
+    defmt::timestamp!("{=u32}", 0);
+}
 
 /// Serialises the tests that touch process-wide state: the RFAL claim, the
 /// shim session (platform, ISR, deadlines, `RF_TX`) and RFAL's C globals.
 ///
-/// Contract for every test module (WP2 `shim`, WP4, WP5, WP7): take it first,
+/// Contract for every test module (this file, `shim`'s unit tests and
+/// [`end_to_end`]): take it first,
 /// `let _guard = crate::tests::rfal_test_lock();`, in every test that claims,
 /// calls `shim::enter` or a shim, creates an `NfcReader`, or calls into `ffi`.
 /// A poisoned lock (a failed test) is taken over, so one failure does not

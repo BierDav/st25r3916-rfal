@@ -1,5 +1,4 @@
-//! The C platform shims and the singleton state behind them (WP2; design
-//! §4.2, §4.3).
+//! The C platform shims and the singleton state behind them.
 //!
 //! `src/c/rfal_platform.h` maps RFAL's platform hooks onto the nine
 //! `st25r3916_rfal_*` functions below. They dispatch to the [`Platform`]

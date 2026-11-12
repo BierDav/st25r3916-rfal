@@ -1,10 +1,10 @@
-//! The reader: RFAL singleton claim, initialisation and the discover flow
-//! (WP4; design §2.3, §3.2, §5).
+//! The reader: RFAL singleton claim, initialisation and the discover flow.
 //!
 //! Every RFAL call goes through [`NfcReader::enter`] (the shim session, see
 //! `shim.rs`), which needs `&mut NfcReader`. The flows step `rfalNfcWorker()`
-//! themselves and read `rfalNfcGetState()` between steps (design §3.3); no
-//! user code runs inside RFAL.
+//! themselves and read `rfalNfcGetState()` between steps instead of reacting
+//! to RFAL's `notifyCb` (a no-op, set only so that RFAL stops in
+//! `POLL_SELECT`), so no user code runs inside RFAL.
 
 use core::fmt;
 use core::mem::ManuallyDrop;
@@ -336,7 +336,7 @@ impl<P: Platform> NfcReader<P> {
     }
 
     /// The discover flow on ready-made RFAL parameters (`notifyCb` is
-    /// overwritten). Tests call it directly with hand-built parameters.
+    /// overwritten).
     pub(crate) async fn discover_raw<M: WaitMode>(
         &mut self,
         mut params: ffi::rfalNfcDiscoverParam,

@@ -1,4 +1,4 @@
-//! How the flows wait between RFAL steps (WP4; design §5).
+//! How the flows wait between RFAL steps.
 //!
 //! Every flow (`discover`, `transceive`, `deactivate`) is written once as a
 //! private `async fn …_impl::<M: WaitMode>(..)`:
@@ -23,8 +23,9 @@ use crate::Platform;
 
 /// Upper bound in milliseconds for one wait between RFAL steps.
 ///
-/// A safety net for states that poll without a software timer (design §4.3,
-/// risk R2). A constant by owner decision (OQ3).
+/// A safety net for RFAL states that poll a chip register with no software
+/// timer pending and no IRQ to end the wait: RFAL is stepped again after at
+/// most this long, even when [`step_wait_ms`] has no deadline to go by.
 pub(crate) const MAX_IDLE_MS: u32 = 10;
 
 /// How long to wait after an RFAL step: until the earliest RFAL timer that
@@ -63,8 +64,9 @@ pub(crate) trait WaitMode {
 /// `wait` first yields once (wakes its own waker and returns `Pending` on its
 /// first poll), then awaits `platform.wait_irq(timeout_ms)`. The yield
 /// guarantees that each poll of a flow future runs at most one RFAL step,
-/// even when `wait_irq` is ready at once. Super-loop firmware relies on that
-/// (design §2.8), and so does fairness on cooperative executors.
+/// even when `wait_irq` is ready at once. Super-loop firmware that polls the
+/// futures by hand with `Waker::noop` relies on that, and so does fairness on
+/// cooperative executors.
 #[derive(Debug)]
 pub(crate) struct AsyncWait;
 

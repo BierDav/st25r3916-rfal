@@ -1,4 +1,4 @@
-//! Discovery configuration and the RF value types (WP3; design §2.5).
+//! Discovery configuration and the RF value types.
 
 use core::fmt;
 use core::ops::{BitOr, BitOrAssign};
@@ -151,7 +151,7 @@ impl DiscoveryConfig {
 
     /// The RFAL discovery parameters for this configuration.
     ///
-    /// Contract (WP3; used by WP4's `discover` flow):
+    /// Contract (the `discover` flow relies on it):
     /// - Starts from the exact equivalent of `rfalNfcDefaultDiscParams`
     ///   (all-zero struct, then RFAL's defaults: `wakeupConfigDefault = true`,
     ///   `wakeupNPolls = 1`, `nfcDepLR = RFAL_NFCDEP_LR_254`, ...).
