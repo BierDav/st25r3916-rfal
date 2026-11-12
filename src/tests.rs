@@ -99,6 +99,9 @@ mod stubs {
 
 struct CountingDriver(Arc<AtomicI32>);
 
+/// Results of reader calls made from inside a state callback.
+type CallResults = Arc<std::sync::Mutex<alloc::vec::Vec<(&'static str, Result<(), RfalError>)>>>;
+
 struct NoopHandle;
 
 impl WorkerHandle for NoopHandle {
@@ -222,7 +225,7 @@ fn discovery_config_defaults() {
     assert!(cfg.on_state_change.is_none());
 
     let cfg = RfalDiscoveryConfig::builder()
-        .techs2_find((PollTech::A | PollTech::V).0)
+        .techs2_find(PollTech::A | PollTech::V)
         .total_duration(500)
         .on_state_change(|_s: RfalNfcState| {})
         .build();
@@ -273,4 +276,70 @@ fn reader_lifecycle_without_chip() {
     drop(other);
     drop(reader);
     assert_eq!(lock_depth(), 0);
+}
+
+/// The state callback re-entering the reader through the (re-entrant) RFAL
+/// lock must not be able to free itself or stop/start the worker. Drives the
+/// trampoline directly, as RFAL's worker would (no chip needed); the
+/// `embedded-hal` tests repeat this through a real worker iteration.
+#[test]
+fn state_callback_reentry_is_rejected() {
+    use std::sync::Mutex;
+
+    let _lock = rfal_test_lock();
+    #[cfg(feature = "embedded-hal")]
+    crate::platform::embedded_hal::EmbeddedHalPlatform::uninstall().unwrap();
+
+    let spawned = Arc::new(AtomicI32::new(0));
+    let reader = Arc::new(Mutex::new(NfcReader::new(Box::new(CountingDriver(
+        spawned.clone(),
+    )))));
+    let results: CallResults = Arc::default();
+    let calls = Arc::new(AtomicI32::new(0));
+
+    let (r, res, n) = (reader.clone(), results.clone(), calls.clone());
+    let cb = Box::into_raw(Box::new(CallbackWrapper {
+        cb: Box::new(move |_state: RfalNfcState| {
+            n.fetch_add(1, Ordering::SeqCst);
+            let mut reader = r.lock().unwrap();
+            let mut res = res.lock().unwrap();
+            res.push((
+                "start_discovery",
+                reader.start_discovery(RfalDiscoveryConfig::default()),
+            ));
+            // Outside the callback, stop() on a stopped reader is Ok and
+            // start() fails with a chip error, not WrongState.
+            res.push(("stop", reader.stop()));
+            res.push(("start", reader.start()));
+            // Nested worker / trampoline calls must not run the callback
+            // again (that would alias the running closure).
+            reader.worker();
+            unsafe { state_change_trampoline(RfalNfcState::Idle.into()) };
+        }),
+    }));
+    with_lock(|| unsafe { replace_state_callback(cb) });
+
+    // What RFAL's worker does: invoke the trampoline with the lock held.
+    with_lock(|| unsafe { state_change_trampoline(RfalNfcState::Activated.into()) });
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "nested callback ran");
+    assert_eq!(
+        *results.lock().unwrap(),
+        [
+            ("start_discovery", Err(RfalError::WrongState)),
+            ("stop", Err(RfalError::WrongState)),
+            ("start", Err(RfalError::WrongState)),
+        ]
+    );
+    assert_eq!(spawned.load(Ordering::SeqCst), 0);
+    // The callback was not replaced or freed from inside itself.
+    assert_eq!(STATE_CALLBACK.load(Ordering::SeqCst), cb);
+    assert!(!IN_STATE_CALLBACK.load(Ordering::SeqCst));
+    assert_eq!(lock_depth(), 0, "unbalanced RFAL lock");
+
+    // Outside the callback the same calls behave normally again.
+    assert_eq!(reader.lock().unwrap().stop(), Ok(()));
+    assert_ne!(reader.lock().unwrap().start(), Err(RfalError::WrongState));
+
+    with_lock(|| unsafe { replace_state_callback(ptr::null_mut()) });
 }

@@ -25,11 +25,14 @@ let mut reader = NfcReader::new(Box::new(MyWorkerDriver)); // see "Platform"
 reader.start()?; // init RFAL + chip, spawn the background worker
 
 let config = RfalDiscoveryConfig::builder()
-    .techs2_find((PollTech::A | PollTech::B).0)
+    .techs2_find(PollTech::A | PollTech::B)
     .total_duration(1000) // ms per discovery round
     .on_state_change(move |state: RfalNfcState| {
         // Runs in the worker's context with the RFAL lock held:
         // keep it short, never block on something the reader's user holds.
+        // Calling back into the reader is fine (e.g. `select_device`), but
+        // `start`, `stop` and `start_discovery` return `WrongState` in here,
+        // and dropping the reader in here leaks it instead of stopping it.
         if state == RfalNfcState::Activated { /* notify your task */ }
     })
     .build();

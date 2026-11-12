@@ -268,7 +268,7 @@ fn reader_against_simulated_chip() {
     reader
         .start_discovery(
             RfalDiscoveryConfig::builder()
-                .techs2_find((PollTech::A | PollTech::B).0)
+                .techs2_find(PollTech::A | PollTech::B)
                 .total_duration(50)
                 .on_state_change(move |s: RfalNfcState| seen.lock().unwrap().push(s))
                 .build(),
@@ -317,4 +317,129 @@ fn reader_against_simulated_chip() {
 
     EmbeddedHalPlatform::uninstall().unwrap();
     assert!(!EmbeddedHalPlatform::is_installed());
+}
+
+/// Hands `worker_fn` to the test instead of running it, so the test can run
+/// worker iterations without holding the reader.
+struct CapturingDriver(WorkerFnSlot);
+
+type WorkerFnSlot = Arc<Mutex<Option<fn()>>>;
+
+impl WorkerDriver for CapturingDriver {
+    fn spawn(
+        &self,
+        worker_fn: fn(),
+        _should_continue: Arc<AtomicBool>,
+    ) -> Result<Box<dyn WorkerHandle>, RfalError> {
+        *self.0.lock().unwrap() = Some(worker_fn);
+        Ok(Box::new(NoopHandle))
+    }
+}
+
+/// A state callback that reaches the reader through a shared handle (and so
+/// re-enters RFAL's re-entrant lock from inside the worker) can neither free
+/// itself nor start/stop the worker; dropping the reader from inside it
+/// leaks the reader instead of freeing the running callback.
+#[test]
+fn state_callback_reentry_through_worker() {
+    let _lock = rfal_test_lock();
+    let chip = SharedChip(Arc::new(Mutex::new(Chip::default())));
+    let clock = Arc::new(AtomicU32::new(0));
+    let worker_fn: WorkerFnSlot = Arc::default();
+    let c = clock.clone();
+    let mut reader = EmbeddedHalPlatform::builder()
+        .spi(MockSpi(chip.clone()))
+        .irq(MockIrq(chip.clone()))
+        .delay(MockDelay(clock.clone()))
+        .clock(move || c.fetch_add(1, Ordering::SeqCst))
+        .driver(Box::new(CapturingDriver(worker_fn.clone())))
+        .install()
+        .expect("install");
+    reader.start().expect("start");
+    let worker_fn = worker_fn.lock().unwrap().expect("worker spawned");
+
+    let shared: Arc<Mutex<Option<NfcReader>>> = Arc::new(Mutex::new(None));
+    let results: CallResults = Arc::default();
+    let drop_now = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicU32::new(0));
+    let (r, res, d, n) = (
+        Arc::downgrade(&shared),
+        results.clone(),
+        drop_now.clone(),
+        calls.clone(),
+    );
+    reader
+        .start_discovery(
+            RfalDiscoveryConfig::builder()
+                .techs2_find(PollTech::A)
+                .total_duration(50)
+                .on_state_change(move |_s: RfalNfcState| {
+                    n.fetch_add(1, Ordering::SeqCst);
+                    let Some(shared) = r.upgrade() else { return };
+                    let mut slot = shared.lock().unwrap();
+                    if d.load(Ordering::SeqCst) {
+                        // Drop the started reader from inside its callback.
+                        drop(slot.take());
+                        return;
+                    }
+                    let Some(reader) = slot.as_mut() else { return };
+                    let mut res = res.lock().unwrap();
+                    if res.is_empty() {
+                        res.push((
+                            "start_discovery",
+                            reader.start_discovery(RfalDiscoveryConfig::default()),
+                        ));
+                        res.push(("stop", reader.stop()));
+                        res.push(("start", reader.start()));
+                        reader.worker(); // no-op in here
+                        let started = reader.is_started();
+                        res.push((
+                            "is_started",
+                            started.then_some(()).ok_or(RfalError::Internal),
+                        ));
+                    }
+                })
+                .build(),
+        )
+        .expect("discovery starts");
+    *shared.lock().unwrap() = Some(reader);
+
+    for _ in 0..50 {
+        worker_fn();
+    }
+    assert!(calls.load(Ordering::SeqCst) > 0, "callback never ran");
+    assert_eq!(
+        *results.lock().unwrap(),
+        [
+            ("start_discovery", Err(RfalError::WrongState)),
+            ("stop", Err(RfalError::WrongState)),
+            ("start", Err(RfalError::WrongState)),
+            ("is_started", Ok(())),
+        ]
+    );
+    assert_eq!(lock_depth(), 0, "unbalanced RFAL lock");
+
+    // Drop from inside the callback: leaked, RFAL keeps running and the
+    // callback stays installed and callable.
+    drop_now.store(true, Ordering::SeqCst);
+    for _ in 0..50 {
+        worker_fn();
+    }
+    assert!(shared.lock().unwrap().is_none(), "reader not dropped");
+    assert!(crate::READER_STARTED.load(Ordering::SeqCst));
+    assert!(!crate::STATE_CALLBACK.load(Ordering::SeqCst).is_null());
+    let before = calls.load(Ordering::SeqCst);
+    for _ in 0..50 {
+        worker_fn();
+    }
+    assert!(calls.load(Ordering::SeqCst) > before, "worker stopped");
+    assert_eq!(lock_depth(), 0, "unbalanced RFAL lock");
+
+    // Clean up the leaked global state so the other tests can start readers.
+    with_lock(|| unsafe {
+        crate::replace_state_callback(core::ptr::null_mut());
+        crate::rfal::rfalDeinitialize();
+    });
+    crate::READER_STARTED.store(false, Ordering::SeqCst);
+    EmbeddedHalPlatform::uninstall().unwrap();
 }

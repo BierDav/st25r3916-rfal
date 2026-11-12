@@ -21,10 +21,12 @@
 //! reader.start()?; // initialises RFAL and spawns the worker via `MyWorkerDriver`
 //!
 //! let config = RfalDiscoveryConfig::builder()
-//!     .techs2_find((PollTech::A | PollTech::B).0)
+//!     .techs2_find(PollTech::A | PollTech::B)
 //!     .total_duration(1000)
 //!     .on_state_change(|state: RfalNfcState| {
 //!         // Runs on the worker's context; keep it short, don't block.
+//!         // It must not call `start`, `stop` or `start_discovery` on the
+//!         // reader, nor drop it (those return `WrongState` from in here).
 //!         if state == RfalNfcState::Activated { /* signal your task */ }
 //!     })
 //!     .build();
@@ -81,6 +83,13 @@
 //! lock is held: it must not block on anything a thread calling into the
 //! [`NfcReader`] might hold (e.g. a mutex around the reader), or it deadlocks.
 //!
+//! The callback may call back into the reader (the lock is re-entrant), but
+//! not to change what is running underneath it: [`NfcReader::start`],
+//! [`NfcReader::stop`] and [`NfcReader::start_discovery`] return
+//! [`RfalError::WrongState`] while called from inside the callback, and
+//! [`NfcReader::worker`] does nothing. Dropping a started reader from inside
+//! the callback leaks it (see [`NfcReader`]'s `Drop`).
+//!
 //! ## Cargo features
 //!
 //! | Feature | Default | Effect |
@@ -95,6 +104,14 @@
 //! | `poll-keep-field-on` | no | Opt-in RFAL patch: keep the field on between rounds of poll-only discovery. |
 //!
 //! The RFAL patches are documented in `rfal/MODIFICATIONS.md`.
+//!
+//! ## Licence of the vendored RFAL sources
+//!
+//! The Rust code of this crate is MIT OR Apache-2.0, but the vendored `rfal/`
+//! C sources are STMicroelectronics code under ST's SLA0051 (MyLiberty)
+//! licence: they are **not open source** and may only be used with an ST
+//! NFC/UHF reader IC. The full terms are in
+//! [`rfal/LICENSE-ST.md`](https://github.com/BierDav/st25r3916-rfal/blob/main/rfal/LICENSE-ST.md).
 #![no_std]
 #![warn(missing_debug_implementations)]
 
@@ -143,9 +160,38 @@ static STATE_CALLBACK: AtomicPtr<CallbackWrapper> = AtomicPtr::new(ptr::null_mut
 /// Set while an [`NfcReader`] is started; RFAL's state is global.
 static READER_STARTED: AtomicBool = AtomicBool::new(false);
 
+/// Set while `state_change_trampoline` runs the user's callback.
+///
+/// Only written by the trampoline, which runs with the RFAL lock held, so it
+/// must only be read with the lock held too: then `true` means *this*
+/// execution context is inside the callback (the lock is re-entrant) — any
+/// other context would still be waiting for the lock. Reading it without the
+/// lock would make a concurrent caller fail spuriously.
+static IN_STATE_CALLBACK: AtomicBool = AtomicBool::new(false);
+
+/// Whether the caller runs inside the state callback. Takes the RFAL lock
+/// (see [`IN_STATE_CALLBACK`]).
+fn in_state_callback() -> bool {
+    with_lock(|| IN_STATE_CALLBACK.load(Ordering::SeqCst))
+}
+
+/// `Err(WrongState)` when called from inside the state callback, for the
+/// operations that would free the running callback or start/stop/join the
+/// worker that runs it.
+fn ensure_not_in_callback() -> Result<(), RfalError> {
+    if in_state_callback() {
+        #[cfg(feature = "log")]
+        log::warn!("st25r3916-rfal: not allowed from inside the state callback");
+        Err(RfalError::WrongState)
+    } else {
+        Ok(())
+    }
+}
+
 /// Must only be called with the RFAL lock held (or when nothing can call the
-/// callback any more).
+/// callback any more), and not from inside the callback.
 unsafe fn replace_state_callback(new: *mut CallbackWrapper) {
+    debug_assert!(!IN_STATE_CALLBACK.load(Ordering::SeqCst));
     let old = STATE_CALLBACK.swap(new, Ordering::SeqCst);
     if !old.is_null() {
         // SAFETY: `old` came from `Box::into_raw` and, with the lock held,
@@ -175,6 +221,12 @@ struct ApduBuffers {
 /// [`start_discovery`](Self::start_discovery). Progress is reported through
 /// the `on_state_change` callback of [`RfalDiscoveryConfig`]. Call
 /// [`stop`](Self::stop) when done; it also runs on `Drop`.
+///
+/// Dropping a started reader from inside its own state callback (e.g. the
+/// callback takes the last handle to it) cannot stop it — that would join
+/// the worker from inside itself and free the running callback — so the
+/// reader is leaked instead: RFAL, the worker and the callback stay alive
+/// and no other reader can be started for the rest of the program.
 ///
 /// RFAL state machine: `Notinit → Idle → StartDiscovery → (Poll*/Listen*) →
 /// Activated → Dataexchange… → Deactivation → StartDiscovery…`
@@ -237,10 +289,12 @@ impl NfcReader {
     /// Initialise RFAL (and the chip) and spawn the background worker.
     ///
     /// # Errors
-    /// * [`RfalError::WrongState`] if this or another reader is already started.
+    /// * [`RfalError::WrongState`] if this or another reader is already
+    ///   started, or when called from inside the state callback.
     /// * Any RFAL error from `rfalNfcInitialize` (e.g. the chip does not answer).
     /// * The error returned by [`WorkerDriver::spawn`].
     pub fn start(&mut self) -> Result<(), RfalError> {
+        ensure_not_in_callback()?;
         if self.started
             || READER_STARTED
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -281,7 +335,14 @@ impl NfcReader {
     /// RFAL code runs after `stop` returns; any APDU exchange in progress is
     /// aborted. The reader can be [`start`](Self::start)ed again afterwards.
     /// A no-op if the reader is not started.
+    ///
+    /// # Errors
+    /// * [`RfalError::WrongState`] when called from inside the state callback
+    ///   (it would join the worker running the callback and free the
+    ///   callback); nothing is stopped then.
+    /// * Any RFAL error from `rfalDeinitialize`.
     pub fn stop(&mut self) -> Result<(), RfalError> {
+        ensure_not_in_callback()?;
         if !self.started {
             return Ok(());
         }
@@ -310,6 +371,11 @@ impl NfcReader {
     /// RFAL must be idle: after a previous discovery, call
     /// [`deactivate`](Self::deactivate) with [`RfalNfcDeactivateType::Idle`]
     /// first. Replaces any previously installed state callback.
+    ///
+    /// # Errors
+    /// [`RfalError::WrongState`] if the reader is not started, or when called
+    /// from inside the state callback (replacing it would free the closure
+    /// that is running); otherwise any error from `rfalNfcDiscover`.
     pub fn start_discovery(&mut self, config: RfalDiscoveryConfig) -> Result<(), RfalError> {
         self.ensure_started()?;
 
@@ -342,10 +408,30 @@ impl NfcReader {
             .map(|cb| Box::into_raw(Box::new(CallbackWrapper { cb: cb.0 })));
         params.notifyCb = callback.map(|_| state_change_trampoline as unsafe extern "C" fn(u32));
 
-        with_lock(|| unsafe {
-            replace_state_callback(callback.unwrap_or(ptr::null_mut()));
-            rfal_result(rfal::rfalNfcDiscover(&params))
-        })
+        let result = with_lock(|| {
+            // Checked under the same lock acquisition that replaces the
+            // callback (see `IN_STATE_CALLBACK`).
+            if IN_STATE_CALLBACK.load(Ordering::SeqCst) {
+                return Err(RfalError::WrongState);
+            }
+            // SAFETY: lock held and not inside the callback, so nobody runs
+            // the old callback.
+            unsafe { replace_state_callback(callback.unwrap_or(ptr::null_mut())) };
+            Ok(rfal_result(unsafe { rfal::rfalNfcDiscover(&params) }))
+        });
+        match result {
+            Ok(r) => r,
+            Err(e) => {
+                // Not installed: free the new callback again.
+                if let Some(cb) = callback {
+                    // SAFETY: from `Box::into_raw` above, never shared.
+                    drop(unsafe { Box::from_raw(cb) });
+                }
+                #[cfg(feature = "log")]
+                log::warn!("st25r3916-rfal: start_discovery() inside the state callback");
+                Err(e)
+            }
+        }
     }
 
     /// Current state of RFAL's NFC state machine.
@@ -428,9 +514,10 @@ impl NfcReader {
     /// RFAL makes progress: call it every few milliseconds while the reader is
     /// started. Calling it while a background worker runs is safe (both are
     /// serialised by [`ffi::RfalLock`]) but pointless. A no-op if the reader
-    /// is not started.
+    /// is not started, or when called from inside the state callback (RFAL's
+    /// worker is not re-entrant).
     pub fn worker(&mut self) {
-        if self.started {
+        if self.started && !in_state_callback() {
             worker::worker_trampoline();
         }
     }
@@ -505,6 +592,28 @@ impl NfcReader {
 
 impl Drop for NfcReader {
     fn drop(&mut self) {
+        if self.started && in_state_callback() {
+            // Dropped from inside the state callback. Stopping would join the
+            // worker from inside itself (deadlock, or `join` returning while
+            // `worker_fn` still runs) and free the closure that is executing
+            // (use-after-free). `Drop` cannot report an error, and aborting
+            // is not available in `no_std` short of a panic (which would
+            // unwind into RFAL's C code). Leaking is sound: the callback, the
+            // APDU buffers RFAL may point into, the worker and its driver all
+            // stay valid, and `READER_STARTED` stays set so no other reader
+            // can reinitialise RFAL underneath the still-running worker.
+            #[cfg(feature = "log")]
+            log::warn!("st25r3916-rfal: NfcReader dropped inside its state callback; leaking it");
+            if let Some(worker) = self.worker.take() {
+                core::mem::forget(worker);
+            }
+            core::mem::forget(core::mem::replace(
+                &mut self.driver,
+                Box::new(ManualWorkerDriver),
+            ));
+            // `apdu` is a `NonNull` and is not freed: leaked as well.
+            return;
+        }
         if self.started {
             #[cfg(feature = "log")]
             log::warn!("st25r3916-rfal: NfcReader dropped without stop(); stopping now");
@@ -523,9 +632,23 @@ unsafe extern "C" fn state_change_trampoline(state: u32) {
         log::warn!("st25r3916-rfal: unknown RFAL state {state} in callback");
         return;
     };
+    // We hold the RFAL lock, so a set flag means the callback re-entered
+    // RFAL's worker (e.g. through the raw worker function). Calling the
+    // closure again would alias its `&mut` state.
+    if IN_STATE_CALLBACK.swap(true, Ordering::SeqCst) {
+        #[cfg(feature = "log")]
+        log::warn!("st25r3916-rfal: nested state callback skipped");
+        return;
+    }
     let ptr = STATE_CALLBACK.load(Ordering::SeqCst);
     if !ptr.is_null() {
-        // SAFETY: only replaced/freed under the RFAL lock, which our caller holds.
+        // SAFETY: only replaced/freed under the RFAL lock, which our caller
+        // holds, and never while `IN_STATE_CALLBACK` is set: everything that
+        // could free it (`start_discovery`, `stop`, `Drop`) refuses to from
+        // inside the callback.
         unsafe { ((*ptr).cb)(state) };
     }
+    // A panicking callback cannot unwind out of this `extern "C"` function
+    // (it aborts), so this is always reached.
+    IN_STATE_CALLBACK.store(false, Ordering::SeqCst);
 }

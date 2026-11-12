@@ -26,6 +26,10 @@ pub fn rfal_result(status: rfal::ReturnCode) -> Result<(), RfalError> {
 // ---------------------------------------------------------------------------
 
 /// Safe wrapper for the `dev` union inside `rfalNfcDevice`.
+///
+/// The payloads are RFAL's own C structs (from [`crate::ffi`]) and mirror
+/// them field by field. They may change when the vendored RFAL is updated;
+/// their layout and fields are outside this crate's semver guarantees.
 #[derive(Debug, Clone)]
 pub enum NfcTarget {
     /// NFC-A (ISO 14443A) listener.
@@ -43,6 +47,10 @@ pub enum NfcTarget {
 }
 
 /// Safe wrapper for the `proto` union inside `rfalNfcDevice`.
+///
+/// The payloads are RFAL's own C structs (from [`crate::ffi`]) and mirror
+/// them field by field. They may change when the vendored RFAL is updated;
+/// their layout and fields are outside this crate's semver guarantees.
 #[derive(Copy, Clone)]
 pub enum NfcProtocol {
     /// Plain RF interface (no ISO-DEP/NFC-DEP), e.g. T2T or MIFARE Classic.
@@ -234,16 +242,30 @@ where
 
 /// Discovery parameters (mirrors `rfalNfcDiscoverParam`). Build it with
 /// [`RfalDiscoveryConfig::builder`]; unset fields get the defaults shown.
+///
+/// `techs2_find` and `techs2_bail` take a [`PollTech`] / [`ListenTech`] (or a
+/// raw `u16` of `RFAL_NFC_*_TECH_*` bits):
+///
+/// ```rust,ignore
+/// let config = RfalDiscoveryConfig::builder()
+///     .techs2_find(PollTech::A | PollTech::B)
+///     .build();
+/// ```
 #[derive(Builder)]
 #[builder(builder_type = RfalDiscoveryConfigBuilder)]
+#[non_exhaustive]
 pub struct RfalDiscoveryConfig {
     #[builder(default = RfalComplianceMode::Iso)]
     pub comp_mode: RfalComplianceMode,
 
-    #[builder(default = PollTech::A.0)]
+    /// Technologies to poll/listen for (`RFAL_NFC_POLL_TECH_*` /
+    /// `RFAL_NFC_LISTEN_TECH_*` bits).
+    #[builder(into, default = PollTech::A)]
     pub techs2_find: u16,
 
-    #[builder(default = 0)]
+    /// Technologies after whose detection the technology detection phase
+    /// stops early.
+    #[builder(into, default = PollTech::NONE)]
     pub techs2_bail: u16,
 
     #[builder(default = 20)]
@@ -305,6 +327,13 @@ pub struct RfalDiscoveryConfig {
 
     /// Called on every RFAL state change from the worker context, with the
     /// RFAL lock held. Required for `PollSelect` (multi-device) handling.
+    ///
+    /// It may call back into the reader (e.g.
+    /// [`select_device`](crate::NfcReader::select_device)), but
+    /// [`start`](crate::NfcReader::start), [`stop`](crate::NfcReader::stop)
+    /// and [`start_discovery`](crate::NfcReader::start_discovery) return
+    /// [`RfalError::WrongState`] from inside it, and dropping the started
+    /// reader from inside it leaks the reader instead of stopping it.
     #[builder(into)]
     pub on_state_change: Option<Callback>,
 }
@@ -345,6 +374,7 @@ impl core::fmt::Debug for RfalDiscoveryConfig {
 /// [`NfcProtocol::IsoDep`] info (`info.FWT`, `info.dFWT`, `info.FSx`, `info.DID`).
 #[derive(Builder, Debug, Clone)]
 #[builder(builder_type = RfalApduTransceiveConfigBuilder)]
+#[non_exhaustive]
 pub struct RfalApduTransceiveConfig {
     pub fwt: u32,
     pub dfwt: u32,

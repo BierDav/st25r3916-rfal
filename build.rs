@@ -473,6 +473,7 @@ fn generate_type_wrappers(content: &str) -> String {
         out.push_str(&format!(
             "/// Rust mirror of the C enum `{c_type}`.\n\
              #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::FromRepr)]\n\
+             #[non_exhaustive]\n\
              #[repr({repr})]\n\
              pub enum {rust_name} {{\n"
         ));
@@ -520,6 +521,7 @@ fn generate_type_wrappers(content: &str) -> String {
         "/// RFAL return codes (`RFAL_ERR_*`). [`RfalError::None`] is success and is\n\
          /// never returned as an `Err` by this crate.\n\
          #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::FromRepr)]\n\
+         #[non_exhaustive]\n\
          #[repr(u16)]\n\
          pub enum RfalError {\n",
     );
