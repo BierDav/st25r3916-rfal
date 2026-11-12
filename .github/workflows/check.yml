@@ -28,8 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -56,8 +56,8 @@ jobs:
             # Skipped (with a notice) until Cargo.toml declares this feature.
             requires: embedded-hal
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: clippy
       - name: Install libclang for bindgen
@@ -92,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Read rust-version from Cargo.toml
         id: msrv
         run: |
@@ -144,8 +144,8 @@ jobs:
             packages: gcc-riscv64-unknown-elf picolibc-riscv64-unknown-elf
             include_dir: /usr/lib/picolibc/riscv64-unknown-elf/include
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           targets: ${{ matrix.target }}
       - name: Install the cross compiler, libc headers and libclang
@@ -199,8 +199,8 @@ jobs:
       DOCS_RS: "1"
       RUSTDOCFLAGS: -Dwarnings
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.120.0
       - name: Install libclang for bindgen
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
       - uses: Swatinem/rust-cache@v2
@@ -217,8 +217,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.120.0
       - name: Install libclang for bindgen
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
       - uses: Swatinem/rust-cache@v2
@@ -239,6 +239,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Shellcheck
         run: shellcheck scripts/*
