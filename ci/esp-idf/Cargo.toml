@@ -1,0 +1,32 @@
+# CI-only firmware that builds and links the `esp-idf` platform of
+# st25r3916-rfal for an ESP-IDF target (ESP32-C3 by default, see
+# .cargo/config.toml). Not part of the published crate. See the README's
+# "ESP-IDF" build section.
+[package]
+name = "st25r3916-rfal-esp-idf-ci"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: the build directory (and with it embuild's `.embuild/` ESP-IDF
+# and tool download) lives here, not in the repository root.
+[workspace]
+
+[[bin]]
+name = "st25r3916-rfal-esp-idf-ci"
+harness = false # no unit tests on the target
+
+[dependencies]
+st25r3916-rfal = { path = "../..", features = ["esp-idf"] }
+esp-idf-svc = "0.53.0"
+log = "0.4.29"
+
+[build-dependencies]
+embuild = "0.33.7"
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true
+opt-level = "z"

@@ -1,0 +1,15 @@
+# RISC-V ESP-IDF targets are tier 3: std is built from source (build-std).
+# For Xtensa use espup's `esp` toolchain instead (`cargo +esp ...`).
+#
+# Pinned, because newer nightlies break this build:
+# - from nightly-2026-10-17 on, std is built against libc 0.2.191, whose
+#   newlib `stat` has `st_atim` while std's espidf code still reads
+#   `st_atime` (rust-lang/rust b728431fca), so std does not compile for any
+#   `*-espidf` target;
+# - nightly-2026-10-16 ICEs on esp-idf-svc 0.53 (`compare_impl_item`:
+#   "DefId::expect_local: embedded_svc::wifi::asynch::Wifi::scan_n::N isn't
+#   local").
+# Move the pin forward once a newer nightly builds `cargo build` here.
+[toolchain]
+channel = "nightly-2026-09-01"
+components = ["rust-src"]

@@ -1,0 +1,4 @@
+/target
+/.embuild
+# Not pinned: the CI job checks the newest semver-compatible dependencies.
+/Cargo.lock

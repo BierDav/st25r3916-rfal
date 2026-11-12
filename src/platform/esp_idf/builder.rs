@@ -1,10 +1,10 @@
-use crate::platform::esp_idf::callbacks::{get_globals, Globals};
+use crate::platform::esp_idf::callbacks::{Globals, get_globals};
 use crate::{NfcReader, RfalError};
 use alloc::boxed::Box;
 use embedded_hal::spi::{Mode, Phase, Polarity};
 use esp_idf_hal::gpio::{InputPin, OutputPin};
 use esp_idf_hal::spi::{
-    config::Config as SpiConfig, SpiAnyPins, SpiDeviceDriver, SpiDriver, SpiDriverConfig,
+    SpiAnyPins, SpiDeviceDriver, SpiDriver, SpiDriverConfig, config::Config as SpiConfig,
 };
 use esp_idf_hal::units::Hertz;
 use std::collections::HashMap;

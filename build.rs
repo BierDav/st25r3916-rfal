@@ -10,6 +10,9 @@
 //!   setups without a cross C compiler.
 //! * `DOCS_RS` - set by docs.rs; implies `RFAL_SKIP_C_BUILD`.
 //! * `ESP_IDF_PATH` - extra newlib headers for ESP-IDF bindgen runs.
+//! * `DEP_ESP_IDF_EMBUILD_ENV_PATH` - set by cargo from esp-idf-sys (feature
+//!   `esp-idf`): the `PATH` with the ESP-IDF GCC, used when no `CC_<target>`
+//!   is given.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -24,6 +27,7 @@ fn main() {
         "DOCS_RS",
         "ESP_IDF_PATH",
         "LIBCLANG_PATH",
+        "DEP_ESP_IDF_EMBUILD_ENV_PATH",
     ] {
         println!("cargo:rerun-if-env-changed={var}");
     }
@@ -180,6 +184,20 @@ fn compile_c(target: &Target, defines: &[(&str, &str)]) {
     if target.arch == "xtensa" {
         build.flag("-mlongcalls");
     }
+    if target.is_esp() && target_cc_var(target).is_none() {
+        // esp-idf-sys installs the GCC toolchain but does not put it on PATH.
+        if let Some(gcc) = esp_idf_sys_gcc(target) {
+            let ar = gcc.with_file_name(format!(
+                "{}-ar{}",
+                esp_gcc_prefix(target),
+                env::consts::EXE_SUFFIX
+            ));
+            build.compiler(&gcc);
+            if ar.is_file() {
+                build.archiver(ar);
+            }
+        }
+    }
     for (name, value) in defines {
         build.define(name, Some(*value));
     }
@@ -323,21 +341,14 @@ fn esp_include_dirs(target: &Target) -> Vec<PathBuf> {
             dirs.push(dir);
         }
     }
-    let toolchain = if target.arch == "xtensa" {
-        "xtensa-esp-elf"
-    } else {
-        "riscv32-esp-elf"
-    };
+    let toolchain = esp_toolchain(target);
 
-    // 1. The compiler explicitly configured for this target.
-    let cc_var = [
-        format!("CC_{}", target.triple),
-        format!("CC_{}", target.triple.replace('-', "_")),
-        "TARGET_CC".to_string(),
-    ]
-    .into_iter()
-    .find_map(|v| env::var(v).ok());
-    if let Some(dir) = cc_var.and_then(|cc| gcc_libc_include_dir(Path::new(&cc), toolchain)) {
+    // 1. The compiler explicitly configured for this target, else the one
+    //    esp-idf-sys installed.
+    let cc = target_cc_var(target)
+        .map(PathBuf::from)
+        .or_else(|| esp_idf_sys_gcc(target));
+    if let Some(dir) = cc.and_then(|cc| gcc_libc_include_dir(&cc, toolchain)) {
         dirs.push(dir);
         return dirs;
     }
@@ -368,6 +379,49 @@ fn esp_include_dirs(target: &Target) -> Vec<PathBuf> {
         target.triple, target.triple
     );
     dirs
+}
+
+/// Name of the Espressif GCC toolchain (and of its libc header directory).
+fn esp_toolchain(target: &Target) -> &'static str {
+    if target.arch == "xtensa" {
+        "xtensa-esp-elf"
+    } else {
+        "riscv32-esp-elf"
+    }
+}
+
+/// Name prefix of the GCC binaries. On Xtensa only the per-chip wrappers
+/// (`xtensa-esp32-elf-gcc`, ...) select the chip's core configuration; the
+/// plain `xtensa-esp-elf-gcc` (cc's default) builds big-endian objects.
+fn esp_gcc_prefix(target: &Target) -> String {
+    if target.arch == "xtensa" {
+        let mcu = target.triple.split('-').nth(1).unwrap_or("esp32");
+        format!("xtensa-{mcu}-elf")
+    } else {
+        esp_toolchain(target).to_string()
+    }
+}
+
+/// C compiler configured for this target through the environment.
+fn target_cc_var(target: &Target) -> Option<String> {
+    [
+        format!("CC_{}", target.triple),
+        format!("CC_{}", target.triple.replace('-', "_")),
+        "TARGET_CC".to_string(),
+    ]
+    .into_iter()
+    .find_map(|v| env::var(v).ok())
+}
+
+/// The GCC of the ESP-IDF toolchain esp-idf-sys installed: cargo passes its
+/// `PATH` (embuild's `EMBUILD_ENV_PATH` metadata) to direct dependents, i.e.
+/// to this crate with the `esp-idf` feature.
+fn esp_idf_sys_gcc(target: &Target) -> Option<PathBuf> {
+    let path = env::var_os("DEP_ESP_IDF_EMBUILD_ENV_PATH")?;
+    let gcc = format!("{}-gcc{}", esp_gcc_prefix(target), env::consts::EXE_SUFFIX);
+    env::split_paths(&path)
+        .map(|dir| dir.join(&gcc))
+        .find(|p| p.is_file())
 }
 
 /// `<toolchain_root>/<toolchain>/include` for a GCC at `<toolchain_root>/bin/<gcc>`,

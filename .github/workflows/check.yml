@@ -167,6 +167,68 @@ jobs:
       - name: Build with embedded-hal
         run: cargo build --locked --target ${{ matrix.target }} --features log,embedded-hal
 
+  esp-idf:
+    # Builds and links the `esp-idf` platform into the firmware in ci/esp-idf
+    # (ESP32-C3). That crate pins the nightly (rust-toolchain.toml) and the
+    # ESP-IDF version (.cargo/config.toml); it has no Cargo.lock, so this job
+    # also checks the newest semver-compatible ESP crates.
+    name: ESP-IDF (riscv32imc-esp-espidf)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ci/esp-idf
+    env:
+      # RUSTFLAGS replaces the target rustflags of ci/esp-idf/.cargo/config.toml,
+      # so repeat them here.
+      RUSTFLAGS: --cfg espidf_time64 -Dwarnings
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read the pinned nightly
+        id: toolchain
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          [ -n "${channel}" ] || { echo "::error::no channel in ci/esp-idf/rust-toolchain.toml"; exit 1; }
+          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rust-src
+      - name: Install libclang and Python's venv module
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev python3-venv
+      # ESP-IDF, its Python env and tools (GCC, CMake, Ninja, esp-clang);
+      # embuild installs them into the build workspace (ci/esp-idf/.embuild),
+      # not ~/.espressif. Its download archives (dist/) are not needed again.
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ci/esp-idf/.embuild
+            !ci/esp-idf/.embuild/espressif/dist
+          key: embuild-${{ runner.os }}-${{ hashFiles('ci/esp-idf/.cargo/config.toml') }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ci/esp-idf
+          key: esp-idf
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install ldproxy
+        run: cargo install ldproxy --locked
+      - name: Build and link the firmware
+        run: cargo build
+      - name: Reject `esp-idf` together with `embedded-hal`
+        run: |
+          set -uo pipefail
+          log="${RUNNER_TEMP}/esp-idf-embedded-hal.log"
+          if cargo check --features st25r3916-rfal/embedded-hal 2> "${log}"; then
+            echo "::error::esp-idf + embedded-hal built on an ESP-IDF target; expected the compile_error! in src/platform/mod.rs"
+            exit 1
+          fi
+          if ! grep -q 'features both provide the RFAL platform hooks' "${log}"; then
+            cat "${log}"
+            echo "::error::esp-idf + embedded-hal failed for another reason than the intended compile_error!"
+            exit 1
+          fi
+
   docs:
     name: Docs
     runs-on: ubuntu-latest

@@ -48,7 +48,7 @@ pub(crate) fn get_globals() -> &'static Mutex<Option<Globals>> {
 
 // ------------------------- SPI callback implementations ----------------------
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformSpiSelect() {
     let mut guard = get_globals().lock().unwrap();
     if let Some(ref mut g) = *guard {
@@ -56,7 +56,7 @@ pub extern "C" fn platformSpiSelect() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformSpiDeselect() {
     let mut guard = get_globals().lock().unwrap();
     if let Some(ref mut g) = *guard {
@@ -67,7 +67,7 @@ pub extern "C" fn platformSpiDeselect() {
 /// `void platformSpiTxRx(const uint8_t *tx, uint8_t *rx, uint16_t len)`.
 /// RFAL passes the same buffer as `tx` and `rx` for reads, and `rx == NULL`
 /// for writes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn platformSpiTxRx(tx_buf: *const u8, rx_buf: *mut u8, len: u16) {
     let len = len as usize;
     if len == 0 {
@@ -111,12 +111,12 @@ pub unsafe extern "C" fn platformSpiTxRx(tx_buf: *const u8, rx_buf: *mut u8, len
 
 // ------------------------- Timing / Timer implementations --------------------
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformDelay(delay_ms: u32) {
     FreeRtos::delay_ms(delay_ms);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformTimerCreate(ms: u32) -> u32 {
     let handle = NEXT_TIMER_HANDLE.fetch_add(1, Ordering::SeqCst);
     let mut guard = get_globals().lock().unwrap();
@@ -127,7 +127,7 @@ pub extern "C" fn platformTimerCreate(ms: u32) -> u32 {
     handle
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformTimerIsExpired(handle: u32) -> bool {
     let triggered = {
         let mut guard = get_globals().lock().unwrap();
@@ -151,7 +151,7 @@ pub extern "C" fn platformTimerIsExpired(handle: u32) -> bool {
     true
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformTimerDestroy(handle: u32) {
     let mut guard = get_globals().lock().unwrap();
     if let Some(ref mut g) = *guard {
@@ -159,7 +159,7 @@ pub extern "C" fn platformTimerDestroy(handle: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformTimerGetRemaining(handle: u32) -> u32 {
     let mut guard = get_globals().lock().unwrap();
     if let Some(ref mut g) = *guard {
@@ -221,79 +221,81 @@ fn unprotect() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformProtectWorker() {
     protect();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformUnprotectWorker() {
     unprotect();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformProtectST25RComm() {
     protect();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformUnprotectST25RComm() {
     unprotect();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformProtectST25RIrqStatus() {
     protect();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformUnprotectST25RIrqStatus() {
     unprotect();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformErrorHandle() {
     log::error!("RFAL: platformErrorHandle called! A critical hardware error occurred.");
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformGpioIsHigh(_port: u32, _pin: u32) -> bool {
     irq_is_high()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformIrqST25RSetCallback(cb: Option<unsafe extern "C" fn()>) {
     let irq_cb = IRQ_CALLBACK.get_or_init(|| Mutex::new(None));
     let mut g = irq_cb.lock().unwrap();
     *g = cb;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn platformIrqST25RPinInitialize() {
     if IRQ_THREAD_STARTED.set(()).is_err() {
         return; // Already running
     }
 
-    std::thread::spawn(|| loop {
-        let triggered = irq_is_high();
+    std::thread::spawn(|| {
+        loop {
+            let triggered = irq_is_high();
 
-        if triggered {
-            run_irq_callback();
+            if triggered {
+                run_irq_callback();
 
-            while irq_is_high() {
-                FreeRtos::delay_ms(1);
+                while irq_is_high() {
+                    FreeRtos::delay_ms(1);
+                }
             }
-        }
 
-        let interval = if let Some(globals_mutex) = GLOBALS.get() {
-            if let Ok(g) = globals_mutex.lock() {
-                g.as_ref().map(|g| g.irq_poll_interval_ms).unwrap_or(1)
+            let interval = if let Some(globals_mutex) = GLOBALS.get() {
+                if let Ok(g) = globals_mutex.lock() {
+                    g.as_ref().map(|g| g.irq_poll_interval_ms).unwrap_or(1)
+                } else {
+                    1
+                }
             } else {
                 1
-            }
-        } else {
-            1
-        };
-        FreeRtos::delay_ms(interval);
+            };
+            FreeRtos::delay_ms(interval);
+        }
     });
 }

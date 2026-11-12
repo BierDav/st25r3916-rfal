@@ -192,22 +192,53 @@ With `ManualWorkerDriver` nothing runs in the background; call
 - **libclang** is needed by bindgen (`LIBCLANG_PATH` if it is not found).
   Extra clang flags (e.g. `--sysroot` for hosted cross targets) go in
   `BINDGEN_EXTRA_CLANG_ARGS` or `BINDGEN_EXTRA_CLANG_ARGS_<target>`.
-- **ESP-IDF:** use the usual esp-rs setup (`espup`/`embuild`); for Xtensa,
-  bindgen needs Espressif's libclang. The build looks for the toolchain's
-  newlib headers via `CC_<target>`, `.embuild/` and `~/.espressif/`
-  (`ESP_IDF_PATH` adds `newlib/platform_include`).
+- **ESP-IDF:** see [Building for ESP-IDF](#building-for-esp-idf). bindgen
+  takes the newlib headers from the same GCC as the C build, falling back to
+  `.embuild/` and `~/.espressif/` (`ESP_IDF_PATH` adds
+  `newlib/platform_include`).
 - `RFAL_SKIP_C_BUILD=1` skips the C build (bindings only). The result does
   not link into a binary; it is meant for `cargo check`/docs. docs.rs builds
   set `DOCS_RS`, which does the same.
 
+### Building for ESP-IDF
+
+[`ci/esp-idf/`](ci/esp-idf) is a minimal ESP32-C3 firmware using the
+`esp-idf` feature; CI builds and links it. Copy its `.cargo/config.toml`,
+`rust-toolchain.toml`, `build.rs` and `sdkconfig.defaults` for your own
+project (esp-idf-template style). You need rustup, libclang, Python 3 (with
+`venv`) and `ldproxy` (`cargo install ldproxy`); the first build downloads
+ESP-IDF v5.5.5, its GCC, CMake and Ninja into `ci/esp-idf/.embuild/` (~5 GB).
+
+```sh
+cd ci/esp-idf
+cargo build    # nightly + -Zbuild-std, see rust-toolchain.toml and .cargo/config.toml
+cargo run      # flash and monitor with espflash
+```
+
+RISC-V ESP-IDF targets (`riscv32imc-esp-espidf`, ...) are tier 3, so std is
+built from source on a pinned nightly: newer nightlies currently fail on
+`*-espidf` (see the comment in `rust-toolchain.toml`). Set `MCU` for other
+RISC-V chips, e.g. `MCU=esp32c6 cargo build --target riscv32imac-esp-espidf`.
+
+Xtensa chips (ESP32, -S2, -S3) need Espressif's Rust fork, at least
+1.99.0.0 for this crate, and its libclang for bindgen:
+
+```sh
+espup install --toolchain-version 1.100.0.0 --targets esp32 --std
+. ~/export-esp.sh   # sets LIBCLANG_PATH
+MCU=esp32 cargo +esp build --target xtensa-esp32-espidf
+```
+
+The C code is compiled with esp-idf-sys's per-chip GCC
+(`riscv32-esp-elf-gcc`, `xtensa-esp32-elf-gcc`, ...) unless `CC_<target>`
+is set.
+
 ## Minimum supported Rust version
 
 The MSRV is the latest stable Rust (currently 1.99) and tracks it: it may
-be raised in any minor release.
-
-On ESP-IDF, Xtensa chips (ESP32, ESP32-S2/S3) need Espressif's `esp`
-toolchain 1.99.0.0 or newer (installed with `espup`); the RISC-V chips
-(ESP32-C3/C6/H2, ...) build with nightly Rust.
+be raised in any minor release. On ESP-IDF, Xtensa chips need Espressif's
+`esp` toolchain 1.99.0.0 or newer, and the RISC-V chips build with nightly
+(see [Building for ESP-IDF](#building-for-esp-idf)).
 
 ## License
 
