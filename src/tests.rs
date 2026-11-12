@@ -18,6 +18,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use crate::error::check;
 use crate::{Error, PlatformError, RfalError, ffi};
 
+mod flows;
+
 /// Serialises the tests that touch process-wide state: the RFAL claim, the
 /// shim session (platform, ISR, deadlines, `RF_TX`) and RFAL's C globals.
 ///

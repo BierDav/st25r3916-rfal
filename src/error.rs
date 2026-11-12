@@ -321,10 +321,6 @@ impl core::error::Error for RfalError {}
 ///
 /// Use it on every `ReturnCode` from an `ffi` call, e.g.
 /// `check(unsafe { ffi::rfalNfcInitialize() })?`.
-#[allow(
-    dead_code,
-    reason = "WP0: unused until WP4's flows call it; remove the allow then"
-)]
 pub(crate) const fn check(code: u16) -> Result<(), RfalError> {
     match RfalError::from_code(code) {
         None => Ok(()),
