@@ -48,6 +48,10 @@ fn main() {
     }
 
     let defines = c_defines();
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+
+    // Bindings first: the C build compiles a layout check derived from them.
+    let abi_check = generate_bindings(&target, &defines, &out_dir);
 
     if skip_c_build() {
         if env::var_os("DOCS_RS").is_none() {
@@ -57,10 +61,8 @@ fn main() {
             );
         }
     } else {
-        compile_c(&target, &defines);
+        compile_c(&target, &defines, &abi_check);
     }
-
-    generate_bindings(&target, &defines);
 }
 
 fn skip_c_build() -> bool {
@@ -111,6 +113,23 @@ impl Target {
     fn is_cross(&self) -> bool {
         self.triple != self.host
     }
+
+    /// Bare-metal ARM (EABI): C enums take the smallest integer type that fits
+    /// their values. That is GCC's `arm-none-eabi` default and the
+    /// `repr(C)` enum layout rustc uses for these targets, but not clang's
+    /// default, so bindgen (and a clang `CC`) must be told explicitly.
+    /// Otherwise e.g. `rfalNfcDiscoverParam` is 180 bytes in C and 228 in Rust.
+    fn has_short_enums(&self) -> bool {
+        self.arch == "arm" && self.os == "none"
+    }
+
+    /// Thumb-1-only cores (Cortex-M0/M0+/M23, ARMv4T/v5TE in Thumb mode). rustc
+    /// does not expose `thumb2` as a stable target feature, hence the triple.
+    fn is_thumb1(&self) -> bool {
+        ["thumbv4t", "thumbv5te", "thumbv6m", "thumbv8m.base"]
+            .iter()
+            .any(|prefix| self.triple.starts_with(prefix))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -160,10 +179,20 @@ const FREESTANDING_INCLUDE_DIR: &str = "src/c/freestanding";
 // C compilation
 // ---------------------------------------------------------------------------
 
-fn compile_c(target: &Target, defines: &[(&str, &str)]) {
+fn compile_c(target: &Target, defines: &[(&str, &str)], abi_check: &Path) {
     let mut build = cc::Build::new();
     build.includes(INCLUDE_DIRS).warnings(false);
 
+    if target.has_short_enums() {
+        // GCC's default here already; makes a clang `CC` agree with bindgen.
+        build.flag("-fshort-enums");
+    }
+    if target.is_thumb1() {
+        // GCC's Thumb-1 switch tables (at -Os) call libgcc's
+        // `__gnu_thumb1_case_*`, which Rust's compiler-builtins lacks: the
+        // final binary would not link.
+        build.flag("-fno-jump-tables");
+    }
     if target.is_bare_metal() || target.is_esp() {
         // Firmware images are linked statically at fixed addresses.
         build.pic(false);
@@ -204,6 +233,9 @@ fn compile_c(target: &Target, defines: &[(&str, &str)]) {
         }
         build.file(path);
     }
+    // Fails the C build if this compiler lays out an RFAL type differently
+    // from the bindings.
+    build.file(abi_check);
 
     build.compile("rfal");
 }
@@ -212,7 +244,9 @@ fn compile_c(target: &Target, defines: &[(&str, &str)]) {
 // Bindings
 // ---------------------------------------------------------------------------
 
-fn generate_bindings(target: &Target, defines: &[(&str, &str)]) {
+/// Writes `bindings.rs` and `rfal_types_gen.rs` to `out_dir`, plus the C
+/// layout check whose path is returned.
+fn generate_bindings(target: &Target, defines: &[(&str, &str)], out_dir: &Path) -> PathBuf {
     let mut builder = bindgen::Builder::default()
         .header("rfal/inc/rfal_nfc.h")
         .header("rfal/inc/rfal_rf.h")
@@ -233,7 +267,9 @@ fn generate_bindings(target: &Target, defines: &[(&str, &str)]) {
         // Deterministic output independent of whether rustfmt is installed:
         // the type-wrapper generator below parses the bindings line by line.
         .formatter(bindgen::Formatter::Prettyplease)
-        .layout_tests(false)
+        // Compile-time asserts that rustc lays out each type as libclang did;
+        // `abi_check_c` turns the same numbers into C asserts for the C compiler.
+        .layout_tests(true)
         .generate_comments(false)
         .allowlist_function("rfal.*")
         .allowlist_type("rfal.*|ReturnCode")
@@ -242,6 +278,9 @@ fn generate_bindings(target: &Target, defines: &[(&str, &str)]) {
 
     if target.is_bare_metal() {
         builder = builder.clang_arg(format!("-I{FREESTANDING_INCLUDE_DIR}"));
+    }
+    if target.has_short_enums() {
+        builder = builder.clang_arg("-fshort-enums");
     }
 
     if target.is_esp() {
@@ -263,7 +302,6 @@ fn generate_bindings(target: &Target, defines: &[(&str, &str)]) {
         .generate()
         .expect("st25r3916-rfal: bindgen failed (is libclang installed? see README)");
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let mut content = bindings.to_string();
 
     // RFAL's error codes are plain `#define RFAL_ERR_X ((ReturnCode)N)` macros,
@@ -281,6 +319,10 @@ fn generate_bindings(target: &Target, defines: &[(&str, &str)]) {
         generate_type_wrappers(&content),
     )
     .expect("could not write rfal_types_gen.rs");
+
+    let abi_check = out_dir.join("abi_check.c");
+    std::fs::write(&abi_check, abi_check_c(&content)).expect("could not write abi_check.c");
+    abi_check
 }
 
 fn has_user_bindgen_args(target: &Target) -> bool {
@@ -456,6 +498,89 @@ fn extract_error_defines(header: &str) -> Vec<(String, u16)> {
 }
 
 // ---------------------------------------------------------------------------
+// C layout check: bindgen's layout tests assert that rustc lays out every type
+// as libclang did. The same numbers as C `_Static_assert`s, compiled with the
+// RFAL sources, assert that the C compiler agrees too, so a C ABI flag that
+// differs between the C build and bindgen (enum size, packing, ...) fails the
+// build instead of corrupting memory.
+// ---------------------------------------------------------------------------
+
+fn abi_check_c(bindings: &str) -> String {
+    let mut checks = String::new();
+    for (kind, item, expected) in layout_tests(bindings) {
+        // Types and fields bindgen invented have no C name.
+        if item.contains("__bindgen") || item.contains("::_") {
+            continue;
+        }
+        let expr = match kind {
+            "Size" => format!("sizeof({item})"),
+            "Alignment" => format!("_Alignof({item})"),
+            _ => match item.split_once("::") {
+                Some((ty, field)) => format!("offsetof({ty}, {})", c_field_name(field)),
+                None => continue,
+            },
+        };
+        checks.push_str(&format!(
+            "_Static_assert({expr} == {expected}u, \"st25r3916-rfal: {expr} differs \
+             between the C compiler and the Rust bindings (see build.rs)\");\n"
+        ));
+    }
+    format!(
+        "/* AUTO-GENERATED by build.rs from the layout tests in bindings.rs - do not edit. */\n\
+         #include <stddef.h>\n\
+         #include \"rfal_nfc.h\"\n\
+         #include \"rfal_rf.h\"\n\
+         \n\
+         #if (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L) || defined(__GNUC__)\n\
+         {checks}\
+         #endif\n"
+    )
+}
+
+/// `(kind, item, value)` of every bindgen layout test, where kind is `Size`,
+/// `Alignment` or `Offset` and item is `Type` or `Type::field`. Parsed from
+/// `["Size of T"][::core::mem::size_of::<T>() - 24usize];`, which prettyplease
+/// may wrap over several lines.
+fn layout_tests(bindings: &str) -> Vec<(&'static str, &str, u64)> {
+    let mut tests = Vec::new();
+    for (kind, prefix) in [
+        ("Size", "\"Size of "),
+        ("Alignment", "\"Alignment of "),
+        ("Offset", "\"Offset of field: "),
+    ] {
+        for (start, _) in bindings.match_indices(prefix) {
+            let rest = &bindings[start + prefix.len()..];
+            let parsed = rest
+                .find('"')
+                .zip(rest.find("usize]"))
+                .and_then(|(end, value_end)| {
+                    // `...() - 24usize]`: the number before the first `usize]`.
+                    let (_, value) = rest[..value_end].rsplit_once("- ")?;
+                    Some((&rest[..end], value.trim().parse().ok()?))
+                });
+            let (item, value) = parsed.unwrap_or_else(|| {
+                panic!("st25r3916-rfal: unparsable bindgen layout test at {prefix}{rest:.60}")
+            });
+            tests.push((kind, item, value));
+        }
+    }
+    tests
+}
+
+/// C name of a bindgen field: bindgen appends `_` to Rust keywords (`type_`).
+fn c_field_name(field: &str) -> &str {
+    const RUST_ONLY_KEYWORDS: [&str; 26] = [
+        "as", "async", "await", "box", "crate", "dyn", "fn", "impl", "in", "let", "loop", "match",
+        "mod", "move", "mut", "pub", "ref", "self", "super", "trait", "type", "unsafe", "use",
+        "where", "yield", "gen",
+    ];
+    match field.strip_suffix('_') {
+        Some(stem) if RUST_ONLY_KEYWORDS.contains(&stem) => stem,
+        _ => field,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Type-wrapper generator: turns `pub type rfalX = c_uint;` + its
 // `pub const rfalX_Y: rfalX = N;` constants into a Rust enum `RfalX`.
 // ---------------------------------------------------------------------------
@@ -463,7 +588,9 @@ fn extract_error_defines(header: &str) -> Vec<(String, u16)> {
 fn generate_type_wrappers(content: &str) -> String {
     use std::collections::BTreeMap;
 
-    // Step 1: integer typedefs `pub type rfal<Name> = ::core::ffi::c_*;`
+    // Step 1: the integer typedefs of C enums, `pub type rfal<Name> = ::core::ffi::c_*;`.
+    // (`uint8_t` & co. come out as `u8`, so these are enums.) With short enums
+    // (bare-metal ARM) the type is the smallest that fits, so it differs by target.
     let mut type_repr: BTreeMap<String, &'static str> = BTreeMap::new();
     for line in content.lines() {
         let Some(rest) = line.trim().strip_prefix("pub type rfal") else {
@@ -472,16 +599,14 @@ fn generate_type_wrappers(content: &str) -> String {
         let Some((name, rhs)) = rest.split_once(" = ") else {
             continue;
         };
-        let repr = if rhs.contains("c_uint") || rhs.contains("c_ulong") {
-            "u32"
-        } else if rhs.contains("c_int") {
-            "i32"
-        } else if rhs.contains("c_ushort") {
-            "u16"
-        } else if rhs.contains("c_short") {
-            "i16"
-        } else {
-            continue; // function pointers, struct aliases, ...
+        let repr = match rhs.trim_end_matches(';').trim() {
+            "::core::ffi::c_uchar" => "u8",
+            "::core::ffi::c_schar" => "i8",
+            "::core::ffi::c_ushort" => "u16",
+            "::core::ffi::c_short" => "i16",
+            "::core::ffi::c_uint" => "u32",
+            "::core::ffi::c_int" => "i32",
+            _ => continue, // function pointers, struct aliases, arrays, ...
         };
         type_repr.insert(format!("rfal{}", name.trim()), repr);
     }
