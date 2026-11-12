@@ -1,8 +1,16 @@
-//! Host tests (WP0 placeholder; WP7 owns this file and `src/tests/**`).
+//! Host tests.
 //!
-//! For now only the error-code tests, which need no RFAL calls. Building this
-//! test binary also links the RFAL C library, which proves that every
-//! `st25r3916_rfal_*` shim symbol is defined.
+//! - this file: the shared [`rfal_test_lock`], the error-code tests and a link
+//!   test proving that the RFAL C library and every `st25r3916_rfal_*` shim
+//!   are in the test binary;
+//! - [`sim_chip`]: a simulated ST25R3916(B) with an NFC-A tag in its field
+//!   (T2T or ISO-DEP T4T), the [`sim_chip::SimPlatform`] and embedded-hal
+//!   parts that drive it, and [`sim_chip::NoChip`] (a board without a chip);
+//! - [`end_to_end`]: the public API (`NfcReader`, `Device`) against the
+//!   simulated board, through RFAL.
+
+mod end_to_end;
+mod sim_chip;
 
 use std::format;
 use std::sync::{Mutex, MutexGuard, PoisonError};
