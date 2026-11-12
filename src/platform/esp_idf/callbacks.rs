@@ -181,13 +181,20 @@ pub extern "C" fn platformTimerGetRemaining(handle: u32) -> u32 {
 /// copied out first so `IRQ_CALLBACK` is not held while the ISR runs: the ISR
 /// takes the RFAL mutex, and holding both in opposite orders on different
 /// threads would deadlock.
+///
+/// The ISR runs under the (recursive) RFAL mutex: RFAL requires that it never
+/// runs concurrently with itself, and both the IRQ thread and timer polling in
+/// the worker can trigger it. The worker's own call nests; the IRQ thread
+/// waits until the current worker iteration has finished.
 fn run_irq_callback() {
     let cb = IRQ_CALLBACK
         .get()
         .and_then(|lock| lock.lock().ok().and_then(|guard| *guard));
     if let Some(cb_fn) = cb {
+        protect();
         // SAFETY: RFAL registered this ISR for exactly this purpose.
         unsafe { cb_fn() };
+        unprotect();
     }
 }
 

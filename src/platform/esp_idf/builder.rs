@@ -30,6 +30,12 @@ impl NfcReader {
             dyn crate::WorkerDriver,
         >,
     ) -> Result<Self, RfalError> {
+        // Replacing the hardware and timers under a running RFAL instance
+        // would break it; stop the existing reader first.
+        if crate::READER_STARTED.load(core::sync::atomic::Ordering::SeqCst) {
+            return Err(RfalError::WrongState);
+        }
+
         let driver_config = SpiDriverConfig::new().dma(esp_idf_hal::spi::Dma::Disabled);
         let device_config = SpiConfig::new().baudrate(spi_clock).data_mode(spi_mode);
 
