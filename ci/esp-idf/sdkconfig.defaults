@@ -1,3 +1,4 @@
-# Rust's std and the RFAL worker thread need more than the 3.5 KiB default.
+# Rust's std, RFAL and the reader running in the main task need more than the
+# 3.5 KiB default.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192
