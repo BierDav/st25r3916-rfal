@@ -217,9 +217,10 @@ jobs:
 
   esp-idf:
     # Builds and links the `esp-idf` platform into the firmware in ci/esp-idf
-    # (ESP32-C3). That crate pins the nightly (rust-toolchain.toml) and the
-    # ESP-IDF version (.cargo/config.toml); it has no Cargo.lock, so this job
-    # also checks the newest semver-compatible ESP crates.
+    # (ESP32-C3), and runs clippy on the library for that target. That crate
+    # pins the nightly (rust-toolchain.toml) and the ESP-IDF version
+    # (.cargo/config.toml); it has no Cargo.lock, so this job also checks the
+    # newest semver-compatible ESP crates.
     name: ESP-IDF (riscv32imc-esp-espidf)
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -242,7 +243,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: rust-src
+          components: rust-src, clippy
       - name: Install libclang and Python's venv module
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev python3-venv
       # ESP-IDF, its Python env and tools (GCC, CMake, Ninja, esp-clang);
@@ -256,7 +257,11 @@ jobs:
           key: embuild-${{ runner.os }}-${{ hashFiles('ci/esp-idf/.cargo/config.toml') }}
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ci/esp-idf
+          # The firmware's target directory, and the repository's for the
+          # library clippy below.
+          workspaces: |
+            ci/esp-idf -> target
+            . -> target
           key: esp-idf
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install ldproxy
@@ -267,6 +272,16 @@ jobs:
         # 0.1 manifests enable `embedded-hal` next to `esp-idf`. Since 0.2 that
         # feature does nothing and no longer conflicts, so it has to keep building.
         run: cargo check --features st25r3916-rfal/embedded-hal
+      - name: Clippy on the library for ESP-IDF
+        # Clippy on the firmware only lints the firmware crate, not the
+        # library it depends on, so src/platform/esp_idf is linted here. Run
+        # from ci/esp-idf for its toolchain, target, build-std and ESP-IDF
+        # settings. esp-idf-sys would otherwise install ESP-IDF and its tools a
+        # second time, into the repository root's .embuild; point it at the
+        # ones the firmware build installed.
+        env:
+          ESP_IDF_TOOLS_INSTALL_DIR: custom:${{ github.workspace }}/ci/esp-idf/.embuild/espressif
+        run: cargo clippy --locked --manifest-path ../../Cargo.toml --features esp-idf,log -- -D warnings
 
   docs:
     name: Docs
