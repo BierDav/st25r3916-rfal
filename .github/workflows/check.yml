@@ -229,7 +229,9 @@ jobs:
       - name: Check the package size
         run: |
           set -euo pipefail
-          crate=$(ls target/package/*.crate)
+          # `publish --dry-run` writes the archive to target/package/tmp-crate/.
+          crate=$(find target/package -name '*.crate' -print -quit)
+          [ -n "${crate}" ] || { echo "::error::no .crate archive found under target/package"; exit 1; }
           size=$(stat -c %s "${crate}")
           echo "${crate}: ${size} bytes" | tee -a "$GITHUB_STEP_SUMMARY"
           [ "${size}" -lt 10000000 ] || { echo "::error::the package exceeds crates.io's 10 MB limit"; exit 1; }
