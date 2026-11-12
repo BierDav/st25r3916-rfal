@@ -200,7 +200,7 @@ jobs:
       # ESP-IDF, its Python env and tools (GCC, CMake, Ninja, esp-clang);
       # embuild installs them into the build workspace (ci/esp-idf/.embuild),
       # not ~/.espressif. Its download archives (dist/) are not needed again.
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             ci/esp-idf/.embuild
