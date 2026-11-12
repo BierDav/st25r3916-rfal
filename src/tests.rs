@@ -43,57 +43,57 @@ mod stubs {
 
     pub static LOCK_DEPTH: AtomicI32 = AtomicI32::new(0);
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformSpiSelect() {}
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformSpiDeselect() {}
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     unsafe extern "C" fn platformSpiTxRx(_tx: *const u8, rx: *mut u8, len: u16) {
         if !rx.is_null() {
             unsafe { core::ptr::write_bytes(rx, 0, len as usize) };
         }
     }
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformIrqST25RPinInitialize() {}
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformIrqST25RSetCallback(_cb: Option<unsafe extern "C" fn()>) {}
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformGpioIsHigh(_port: u32, _pin: u32) -> bool {
         false
     }
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformProtectST25RComm() {}
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformUnprotectST25RComm() {}
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformProtectST25RIrqStatus() {}
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformUnprotectST25RIrqStatus() {}
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformProtectWorker() {
         LOCK_DEPTH.fetch_add(1, Ordering::SeqCst);
     }
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformUnprotectWorker() {
         LOCK_DEPTH.fetch_sub(1, Ordering::SeqCst);
     }
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformDelay(_ms: u32) {}
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformTimerCreate(_ms: u32) -> u32 {
         0
     }
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformTimerIsExpired(_timer: u32) -> bool {
         true
     }
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformTimerGetRemaining(_timer: u32) -> u32 {
         0
     }
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformTimerDestroy(_timer: u32) {}
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn platformErrorHandle() {}
 }
 

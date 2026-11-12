@@ -3,7 +3,7 @@
  *
  * This header is included by every RFAL source file (via rfal_features.h).
  * It declares the platform hooks that the *final application* has to provide
- * (normally as `#[no_mangle] extern "C"` Rust functions, see the crate docs
+ * (normally as `#[unsafe(no_mangle)] extern "C"` Rust functions, see the crate docs
  * for the full contract) and fixes the RFAL feature configuration.
  *
  * The header is deliberately freestanding: it only needs <stdint.h>,

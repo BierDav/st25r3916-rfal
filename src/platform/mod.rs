@@ -13,7 +13,7 @@
 //!
 //! To add a platform: create `src/platform/<name>/`, gate it here behind its
 //! own Cargo feature (and target cfg if needed), and export every function of
-//! the contract with `#[no_mangle] extern "C"`.
+//! the contract with `#[unsafe(no_mangle)] extern "C"`.
 
 #[cfg(all(feature = "esp-idf", feature = "embedded-hal", target_os = "espidf"))]
 compile_error!(

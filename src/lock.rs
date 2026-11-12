@@ -1,6 +1,6 @@
 //! Serialisation of all Rust-side calls into RFAL.
 
-extern "C" {
+unsafe extern "C" {
     fn platformProtectWorker();
     fn platformUnprotectWorker();
 }

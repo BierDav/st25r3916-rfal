@@ -1,8 +1,8 @@
 [package]
 name = "st25r3916-rfal"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.88"
+edition = "2024"
+rust-version = "1.99"
 description = "Safe Rust wrapper around ST's RFAL C library (v4.0.2) for the ST25R3916 / ST25R3916B NFC reader ICs"
 # The Rust wrapper is MIT OR Apache-2.0; the vendored ST RFAL sources in
 # rfal/ are under ST's SLA0051 (not open source), see rfal/LICENSE-ST.md.
@@ -63,9 +63,9 @@ esp-idf = ["log", "dep:esp-idf-svc", "dep:esp-idf-sys", "dep:esp-idf-hal", "dep:
 embedded-hal = ["dep:embedded-hal", "dep:critical-section"]
 
 [dependencies]
-strum = { version = "0.26", default-features = false, features = ["derive"] }
-bon = { version = "3", default-features = false }
-log = { version = "0.4.29", optional = true }
+strum = { version = "0.28", default-features = false, features = ["derive"] }
+bon = { version = "3.10.3", default-features = false }
+log = { version = "0.4.35", optional = true }
 embedded-hal = { version = "1.0.0", optional = true }
 critical-section = { version = "1.2.0", optional = true }
 
@@ -75,9 +75,9 @@ esp-idf-sys = { version = "0.37.2", optional = true }
 esp-idf-hal = { version = "0.46.2", optional = true }
 
 [build-dependencies]
-bindgen = { version = "0.72.1", features = ["prettyplease"] }
-cc = "1.2"
-glob = "0.3.3"
+bindgen = { version = "0.73.2", features = ["prettyplease"] }
+cc = "1.11"
+glob = "0.3.4"
 
 [dev-dependencies]
 # Host tests of the `embedded-hal` platform need a critical-section implementation.

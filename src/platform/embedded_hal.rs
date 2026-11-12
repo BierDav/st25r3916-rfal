@@ -369,18 +369,14 @@ fn timer_expired(now: u32, deadline: u32) -> bool {
 /// Remaining ms of a timer expiring at `deadline` (wrapping), 0 if expired.
 fn timer_remaining(now: u32, deadline: u32) -> u32 {
     let d = deadline.wrapping_sub(now) as i32;
-    if d > 0 {
-        d as u32
-    } else {
-        0
-    }
+    if d > 0 { d as u32 } else { 0 }
 }
 
 // ---------------------------------------------------------------------------
 // Platform hooks
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformSpiSelect() {
     with_state(|s| {
         s.selected = true;
@@ -388,13 +384,13 @@ extern "C" fn platformSpiSelect() {
     });
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformSpiDeselect() {
     with_state(|s| s.selected = false);
 }
 
 /// `void platformSpiTxRx(const uint8_t *tx, uint8_t *rx, uint16_t len)`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 unsafe extern "C" fn platformSpiTxRx(tx: *const u8, rx: *mut u8, len: u16) {
     let len = usize::from(len);
     if len == 0 {
@@ -445,17 +441,17 @@ unsafe extern "C" fn platformSpiTxRx(tx: *const u8, rx: *mut u8, len: u16) {
     });
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformIrqST25RPinInitialize() {
     // The pin is configured by the HAL before it is handed to the builder.
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformIrqST25RSetCallback(cb: Option<unsafe extern "C" fn()>) {
     critical_section::with(|cs| IRQ_CALLBACK.borrow(cs).set(cb));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformGpioIsHigh(_port: u32, _pin: u32) -> bool {
     irq_is_high()
 }
@@ -499,27 +495,27 @@ fn unprotect() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformProtectST25RComm() {
     protect();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformUnprotectST25RComm() {
     unprotect();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformProtectST25RIrqStatus() {
     protect();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformUnprotectST25RIrqStatus() {
     unprotect();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformProtectWorker() {
     let outermost = critical_section::with(|cs| {
         let depth = WORKER_DEPTH.borrow(cs);
@@ -531,7 +527,7 @@ extern "C" fn platformProtectWorker() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformUnprotectWorker() {
     critical_section::with(|cs| {
         let depth = WORKER_DEPTH.borrow(cs);
@@ -539,7 +535,7 @@ extern "C" fn platformUnprotectWorker() {
     });
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformDelay(ms: u32) {
     if let Some(mut delay) = with_state(|s| s.delay.take()).flatten() {
         delay.delay_ms(ms);
@@ -556,12 +552,12 @@ extern "C" fn platformDelay(ms: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformTimerCreate(ms: u32) -> u32 {
     now_ms().unwrap_or(0).wrapping_add(ms)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformTimerIsExpired(timer: u32) -> bool {
     if poll_mode() {
         poll_irq();
@@ -569,15 +565,15 @@ extern "C" fn platformTimerIsExpired(timer: u32) -> bool {
     now_ms().is_none_or(|now| timer_expired(now, timer))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformTimerGetRemaining(timer: u32) -> u32 {
     now_ms().map_or(0, |now| timer_remaining(now, timer))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformTimerDestroy(_timer: u32) {}
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn platformErrorHandle() {
     #[cfg(feature = "log")]
     log::error!("st25r3916-rfal: RFAL reported a fatal platform/driver error");

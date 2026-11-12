@@ -5,7 +5,7 @@
 //! (SPI framing, IRQ servicing, timers, locks), not RF behaviour.
 
 use super::*;
-use crate::platform::embedded_hal::{test_support, EmbeddedHalPlatform, IrqMode};
+use crate::platform::embedded_hal::{EmbeddedHalPlatform, IrqMode, test_support};
 use core::convert::Infallible;
 use core::sync::atomic::AtomicU32;
 use embedded_hal::delay::DelayNs;
@@ -245,17 +245,19 @@ fn reader_against_simulated_chip() {
             chip.frames.first().map(Vec::as_slice),
             Some(&[CMD_SET_DEFAULT][..])
         );
-        assert!(chip
-            .frames
-            .iter()
-            .any(|f| f.first() == Some(&(0x40 | REG_IC_IDENTITY as u8)) && f.len() == 2));
+        assert!(
+            chip.frames
+                .iter()
+                .any(|f| f.first() == Some(&(0x40 | REG_IC_IDENTITY as u8)) && f.len() == 2)
+        );
         // The oscillator was enabled, and the raised IRQs were serviced by
         // polling: the ISR read all four IRQ registers in one frame.
         assert_ne!(chip.regs_a[REG_OP_CONTROL] & 0x80, 0);
-        assert!(chip
-            .frames
-            .iter()
-            .any(|f| f.first() == Some(&(0x40 | REG_IRQ_MAIN as u8)) && f.len() == 5));
+        assert!(
+            chip.frames
+                .iter()
+                .any(|f| f.first() == Some(&(0x40 | REG_IRQ_MAIN as u8)) && f.len() == 5)
+        );
         assert_eq!(chip.multi_op_transactions, 0);
     }
     assert_eq!(test_support::framing_errors(), 0);

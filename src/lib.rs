@@ -43,9 +43,9 @@
 //! ## Platform contract
 //!
 //! The final binary must export the following functions with C linkage
-//! (`#[no_mangle] pub extern "C" fn ...` in Rust). The `embedded-hal` feature
-//! provides all of them for any embedded-hal 1.0 HAL, the `esp-idf` feature on
-//! ESP-IDF; otherwise you implement them.
+//! (`#[unsafe(no_mangle)] pub extern "C" fn ...` in Rust). The `embedded-hal`
+//! feature provides all of them for any embedded-hal 1.0 HAL, the `esp-idf`
+//! feature on ESP-IDF; otherwise you implement them.
 //!
 //! | Function | C signature | Notes |
 //! |---|---|---|

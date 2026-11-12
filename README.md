@@ -149,8 +149,8 @@ The RFAL patches are not NFC Forum compliant; see
 ## Platform contract
 
 The final binary must export these functions with C linkage, e.g.
-`#[no_mangle] pub extern "C" fn platformDelay(ms: u32) { ... }`. They are
-declared in [`src/c/rfal_platform.h`](src/c/rfal_platform.h). The
+`#[unsafe(no_mangle)] pub extern "C" fn platformDelay(ms: u32) { ... }`. They
+are declared in [`src/c/rfal_platform.h`](src/c/rfal_platform.h). The
 `embedded-hal` and `esp-idf` features provide all of them.
 
 | Function | C signature | Notes |
@@ -199,6 +199,15 @@ With `ManualWorkerDriver` nothing runs in the background; call
 - `RFAL_SKIP_C_BUILD=1` skips the C build (bindings only). The result does
   not link into a binary; it is meant for `cargo check`/docs. docs.rs builds
   set `DOCS_RS`, which does the same.
+
+## Minimum supported Rust version
+
+The MSRV is the latest stable Rust (currently 1.99) and tracks it: it may
+be raised in any minor release.
+
+On ESP-IDF, Xtensa chips (ESP32, ESP32-S2/S3) need Espressif's `esp`
+toolchain 1.99.0.0 or newer (installed with `espup`); the RISC-V chips
+(ESP32-C3/C6/H2, ...) build with nightly Rust.
 
 ## License
 

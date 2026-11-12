@@ -207,6 +207,16 @@ fn generate_bindings(target: &Target, defines: &[(&str, &str)]) {
         .clang_args(INCLUDE_DIRS.iter().map(|d| format!("-I{d}")))
         .clang_args(defines.iter().map(|(n, v)| format!("-D{n}={v}")))
         .clang_arg("-D__BINDGEN__")
+        // Edition 2024 code (`unsafe extern` blocks, unsafe ops wrapped in
+        // `unsafe {}` inside unsafe fns) for the MSRV rather than for whichever
+        // rustc runs this, so the output does not depend on the compiler.
+        .rust_target(
+            env!("CARGO_PKG_RUST_VERSION")
+                .parse()
+                .expect("rust-version is a valid bindgen RustTarget"),
+        )
+        .rust_edition(bindgen::RustEdition::Edition2024)
+        .wrap_unsafe_ops(true)
         .use_core()
         // Deterministic output independent of whether rustfmt is installed:
         // the type-wrapper generator below parses the bindings line by line.
@@ -227,12 +237,14 @@ fn generate_bindings(target: &Target, defines: &[(&str, &str)]) {
         for dir in esp_include_dirs(target) {
             builder = builder.clang_arg(format!("-isystem{}", dir.display()));
         }
-    } else if target.is_cross() && !target.is_bare_metal() && !has_user_bindgen_args(target) {
+    } else if target.is_cross()
+        && !target.is_bare_metal()
+        && !has_user_bindgen_args(target)
         // Hosted cross target (e.g. a Linux SBC): clang needs the target's libc
         // headers. Best effort: ask the C compiler `cc` would use for its sysroot.
-        if let Some(sysroot) = compiler_sysroot() {
-            builder = builder.clang_arg(format!("--sysroot={}", sysroot.display()));
-        }
+        && let Some(sysroot) = compiler_sysroot()
+    {
+        builder = builder.clang_arg(format!("--sysroot={}", sysroot.display()));
     }
 
     let bindings = builder
