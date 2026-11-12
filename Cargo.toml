@@ -2,7 +2,7 @@
 name = "st25r3916-rfal"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.88"
 description = "Safe Rust wrapper around ST's RFAL C library (v4.0.2) for the ST25R3916 / ST25R3916B NFC reader ICs"
 # The Rust wrapper is MIT OR Apache-2.0; the vendored ST RFAL sources in
 # rfal/ are under ST's SLA0051 (not open source), see rfal/LICENSE-ST.md.

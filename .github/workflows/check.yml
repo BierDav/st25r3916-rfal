@@ -120,6 +120,15 @@ jobs:
           # Newer lints are not the MSRV's concern.
           RUSTFLAGS: ""
         run: cargo check --locked
+      - name: Check with the MSRV toolchain and freshly resolved dependencies
+        if: steps.msrv.outputs.version != ''
+        env:
+          RUSTFLAGS: ""
+        # Users don't get our Cargo.lock: make sure the newest semver-compatible
+        # dependencies still build with the declared rust-version.
+        run: |
+          rm Cargo.lock
+          cargo check
 
   cross:
     # Bare-metal targets: bindgen against the target's libc headers and, when
