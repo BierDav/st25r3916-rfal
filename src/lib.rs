@@ -34,3 +34,8 @@ pub use info::{
 };
 pub use platform::{Clock, Platform, hal::Hal};
 pub use reader::{CHIP, Chip, NewError, NfcReader};
+
+/// Compiles the 0.2 code blocks of the migration guide as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../MIGRATION.md")]
+struct MigrationGuide;

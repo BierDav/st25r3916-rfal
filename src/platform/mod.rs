@@ -34,7 +34,7 @@ pub mod esp_idf;
 ///
 /// Only from inside RFAL operations of the reader that owns the platform
 /// (`NfcReader::new`, `discover`, `transceive`, `deactivate`, `with_raw`,
-/// dropping a reader or device), synchronously, on the thread or task making
+/// `release`, dropping a reader or device), synchronously, on the thread or task making
 /// that call. Never from an interrupt handler and never concurrently.
 /// RFAL's interrupt service routine also runs there: a hardware interrupt on
 /// the IRQ line only ends a [`wait_irq`](Self::wait_irq) /

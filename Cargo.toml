@@ -4,7 +4,8 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
 # One RFAL per binary: RFAL keeps its state in C globals, so Cargo must refuse to
-# link two copies (e.g. 0.1 and 0.2) into one program.
+# link two copies into one program. (0.1.0 did not declare `links`, so this only
+# guards against 0.2 together with later versions.)
 links = "rfal"
 description = "Safe Rust wrapper around ST's RFAL C library (v4.0.2) for the ST25R3916 / ST25R3916B NFC reader ICs"
 # The Rust wrapper is MIT OR Apache-2.0; the vendored ST RFAL sources in

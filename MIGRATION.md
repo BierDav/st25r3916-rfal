@@ -131,10 +131,10 @@ fn run(
     let config = DiscoveryConfig::new().with_poll(PollTech::A | PollTech::B);
     loop {
         let mut device = reader.blocking_discover(&config)?;
-        log::info!("UID {:02x?}", device.info().uid());
+        let _uid: &[u8] = device.info().uid();
         if device.info().iso_dep().is_some() {
-            let response = device.blocking_transceive(&SELECT_NDEF)?; // &[u8]
-            log::info!("response {:02x?}", response);
+            let response: &[u8] = device.blocking_transceive(&SELECT_NDEF)?;
+            let _status_word = &response[response.len().saturating_sub(2)..];
         }
         // Dropping `device` deactivates it (field off); the loop discovers again.
     }

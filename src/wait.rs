@@ -63,8 +63,9 @@ pub(crate) trait WaitMode {
 ///
 /// `wait` first yields once (wakes its own waker and returns `Pending` on its
 /// first poll), then awaits `platform.wait_irq(timeout_ms)`. The yield
-/// guarantees that each poll of a flow future runs at most one RFAL step,
-/// even when `wait_irq` is ready at once. Super-loop firmware that polls the
+/// bounds the work done per poll of a flow future to a few RFAL steps (one,
+/// or two when a `Select` decision is applied right after POLL_SELECT), even
+/// when `wait_irq` is ready at once. Super-loop firmware that polls the
 /// futures by hand with `Waker::noop` relies on that, and so does fairness on
 /// cooperative executors.
 #[derive(Debug)]

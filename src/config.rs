@@ -47,10 +47,16 @@ pub struct DiscoveryConfig {
     /// Protocol compliance mode. Default: [`ComplianceMode::Nfc`].
     pub compliance: ComplianceMode,
     /// Highest bit rate to negotiate. Default: [`BitRate::Keep`].
+    /// Values above [`BitRate::Kbps1695`] (other than `Keep`) make
+    /// `discover` fail with [`RfalError::Param`](crate::RfalError::Param).
     pub max_bit_rate: BitRate,
     /// Bit rate to poll NFC-F with. Default: [`BitRate::Kbps212`].
+    /// When polling NFC-F, anything but 212 or 424 kbit/s makes `discover`
+    /// fail with [`RfalError::Param`](crate::RfalError::Param).
     pub nfcf_bit_rate: BitRate,
     /// Bit rate to poll active P2P with. Default: [`BitRate::Kbps424`].
+    /// When polling AP2P, values above 424 kbit/s make `discover` fail with
+    /// [`RfalError::Param`](crate::RfalError::Param).
     pub ap2p_bit_rate: BitRate,
     /// Maximum ISO-DEP frame size the reader announces (FSD). Default:
     /// [`FrameSize::B256`].
