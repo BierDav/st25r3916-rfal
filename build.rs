@@ -582,7 +582,10 @@ fn c_field_name(field: &str) -> &str {
 
 // ---------------------------------------------------------------------------
 // Type-wrapper generator: turns `pub type rfalX = c_uint;` + its
-// `pub const rfalX_Y: rfalX = N;` constants into a Rust enum `RfalX`.
+// `pub const rfalX_Y: rfalX = N;` constants into a Rust enum `RfalX` with
+// `RfalX::from_repr`, `TryFrom<rfalX>` and `From<RfalX> for rfalX`. The
+// `RFAL_ERR_*` codes stay plain `u16` constants; the error type is the
+// hand-written `crate::RfalError`.
 // ---------------------------------------------------------------------------
 
 fn generate_type_wrappers(content: &str) -> String {
@@ -655,80 +658,57 @@ fn generate_type_wrappers(content: &str) -> String {
             .map(capitalize_word)
             .unwrap_or_default();
 
+        let variants: Vec<(String, &str, i64)> = variants
+            .iter()
+            .map(|(c_name, value)| {
+                let rem = c_name.strip_prefix(&common).unwrap_or(c_name);
+                (make_variant_name(rem, &fallback), c_name.as_str(), *value)
+            })
+            .collect();
+
         out.push_str(&format!(
             "/// Rust mirror of the C enum `{c_type}`.\n\
-             #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::FromRepr)]\n\
+             #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\n\
+             #[cfg_attr(feature = \"defmt\", derive(defmt::Format))]\n\
              #[non_exhaustive]\n\
              #[repr({repr})]\n\
              pub enum {rust_name} {{\n"
         ));
-        for (c_name, value) in &variants {
-            let rem = c_name.strip_prefix(&common).unwrap_or(c_name);
-            out.push_str(&format!(
-                "    /// `{c_name}`\n    {} = {value},\n",
-                make_variant_name(rem, &fallback)
-            ));
+        for (variant, c_name, value) in &variants {
+            out.push_str(&format!("    /// `{c_name}`\n    {variant} = {value},\n"));
         }
-        out.push_str("}\n\n");
         out.push_str(&format!(
-            "impl TryFrom<{repr}> for {rust_name} {{\n\
+            "}}\n\n\
+             impl {rust_name} {{\n\
+             \x20   /// The variant with this C value, or `None` if RFAL defines no `{c_type}` constant for it.\n\
+             \x20   #[inline]\n\
+             \x20   pub const fn from_repr(v: {c_type}) -> Option<Self> {{\n\
+             \x20       match v {{\n"
+        ));
+        for (variant, _, value) in &variants {
+            out.push_str(&format!("            {value} => Some(Self::{variant}),\n"));
+        }
+        out.push_str(&format!(
+            "            _ => None,\n\
+             \x20       }}\n\
+             \x20   }}\n\
+             }}\n\n\
+             impl TryFrom<{c_type}> for {rust_name} {{\n\
+             \x20   /// The value is not one of RFAL's `{c_type}` constants.\n\
              \x20   type Error = ();\n\
              \x20   #[inline]\n\
-             \x20   fn try_from(v: {repr}) -> Result<Self, ()> {{\n\
+             \x20   fn try_from(v: {c_type}) -> Result<Self, ()> {{\n\
              \x20       Self::from_repr(v).ok_or(())\n\
              \x20   }}\n\
              }}\n\n\
-             impl From<{rust_name}> for {repr} {{\n\
+             impl From<{rust_name}> for {c_type} {{\n\
              \x20   #[inline]\n\
-             \x20   fn from(v: {rust_name}) -> {repr} {{\n\
-             \x20       v as {repr}\n\
+             \x20   fn from(v: {rust_name}) -> {c_type} {{\n\
+             \x20       v as {c_type}\n\
              \x20   }}\n\
              }}\n\n"
         ));
     }
-
-    // RfalError from the RFAL_ERR_* constants.
-    let mut errors: Vec<(String, u16)> = content
-        .lines()
-        .filter_map(|line| {
-            let rest = line.strip_prefix("pub const RFAL_ERR_")?;
-            let (name, value) = rest.split_once(": u16 = ")?;
-            Some((
-                screaming_snake_to_camel(name),
-                value.trim_end_matches(';').parse().ok()?,
-            ))
-        })
-        .collect();
-    errors.sort_by_key(|(_, v)| *v);
-    errors.dedup_by_key(|(_, v)| *v);
-
-    out.push_str(
-        "/// RFAL return codes (`RFAL_ERR_*`). [`RfalError::None`] is success and is\n\
-         /// never returned as an `Err` by this crate.\n\
-         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::FromRepr)]\n\
-         #[non_exhaustive]\n\
-         #[repr(u16)]\n\
-         pub enum RfalError {\n",
-    );
-    for (name, value) in &errors {
-        out.push_str(&format!("    {name} = {value},\n"));
-    }
-    out.push_str(
-        "}\n\n\
-         impl TryFrom<u16> for RfalError {\n\
-         \x20   type Error = ();\n\
-         \x20   #[inline]\n\
-         \x20   fn try_from(v: u16) -> Result<Self, ()> {\n\
-         \x20       Self::from_repr(v).ok_or(())\n\
-         \x20   }\n\
-         }\n\n\
-         impl From<RfalError> for u16 {\n\
-         \x20   #[inline]\n\
-         \x20   fn from(v: RfalError) -> u16 {\n\
-         \x20       v as u16\n\
-         \x20   }\n\
-         }\n",
-    );
     out
 }
 

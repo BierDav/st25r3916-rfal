@@ -37,7 +37,8 @@ jobs:
   host:
     # Clippy and tests on the host for every supported feature combination.
     # `--all-features` is not meaningful: the chip variants are mutually
-    # exclusive and `esp-idf` only builds for ESP-IDF targets.
+    # exclusive and `esp-idf` only builds for ESP-IDF targets. `embedded-hal`
+    # is a no-op feature since 0.2.
     name: Host (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -47,12 +48,14 @@ jobs:
         include:
           - name: default
             args: ""
-          - name: log
-            args: --features log
           - name: st25r3916
             args: --no-default-features --features st25r3916
-          - name: embedded-hal
-            args: --features embedded-hal
+          - name: log
+            args: --features log
+          - name: defmt
+            args: --features defmt
+          - name: log+defmt
+            args: --features log,defmt
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -101,7 +104,7 @@ jobs:
         env:
           # Newer lints are not the MSRV's concern.
           RUSTFLAGS: ""
-        run: cargo check --locked --features log,embedded-hal
+        run: cargo check --locked --features log,defmt
       - name: Check with the MSRV toolchain and freshly resolved dependencies
         if: steps.msrv.outputs.version != ''
         env:
@@ -110,7 +113,7 @@ jobs:
         # dependencies still build with the declared rust-version.
         run: |
           rm Cargo.lock
-          cargo check --features log,embedded-hal
+          cargo check --features log,defmt
 
   cross:
     # Bare-metal targets: bindgen against the target's libc headers and the
@@ -118,6 +121,8 @@ jobs:
     name: Cross (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      RUSTFLAGS: -Dwarnings ${{ matrix.rustflags }}
     strategy:
       fail-fast: false
       matrix:
@@ -125,11 +130,21 @@ jobs:
           - target: thumbv7em-none-eabihf
             packages: gcc-arm-none-eabi libnewlib-arm-none-eabi
             include_dir: /usr/lib/arm-none-eabi/include
+            nm: arm-none-eabi-nm
+          - target: thumbv6m-none-eabi
+            # RP2040 / Cortex-M0+: no compare-and-swap, so the reader's claim
+            # flag needs portable-atomic's single-core cfg (or its
+            # critical-section feature).
+            rustflags: --cfg portable_atomic_unsafe_assume_single_core
+            packages: gcc-arm-none-eabi libnewlib-arm-none-eabi
+            include_dir: /usr/lib/arm-none-eabi/include
+            nm: arm-none-eabi-nm
           - target: riscv32imac-unknown-none-elf
             # cc finds riscv64-unknown-elf-gcc for riscv32 targets and passes
             # -march/-mabi; compiling (not linking) needs no rv32 multilib.
             packages: gcc-riscv64-unknown-elf picolibc-riscv64-unknown-elf
             include_dir: /usr/lib/picolibc/riscv64-unknown-elf/include
+            nm: riscv64-unknown-elf-nm
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -164,8 +179,41 @@ jobs:
         run: cargo build --locked --target ${{ matrix.target }}
       - name: Build with log
         run: cargo build --locked --target ${{ matrix.target }} --features log
-      - name: Build with embedded-hal
-        run: cargo build --locked --target ${{ matrix.target }} --features log,embedded-hal
+      - name: Build with defmt
+        run: cargo build --locked --target ${{ matrix.target }} --features defmt
+      - name: Build optimised for size
+        # The usual firmware profile. GCC emits other helper calls at -Os
+        # (Thumb-1 switch tables), so the symbol check covers this build too.
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: s
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Check the symbols RFAL needs from the firmware
+        # The RFAL archive may only reference the crate's shims, the mem*
+        # functions and compiler-builtins' ARM EABI helpers. Anything else
+        # (a `platform*` hook, libc, a libgcc-only helper) would fail to link
+        # into a Rust firmware.
+        env:
+          TARGET: ${{ matrix.target }}
+          NM: ${{ matrix.nm }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          libs=(target/"${TARGET}"/*/build/st25r3916-rfal-*/out/librfal.a)
+          [ "${#libs[@]}" -gt 0 ] || { echo "::error::no librfal.a under target/${TARGET}"; exit 1; }
+          status=0
+          for lib in "${libs[@]}"; do
+            symbols=$("${NM}" -g -P "${lib}")
+            defined=$(awk 'NF >= 2 && $2 != "U" { print $1 }' <<< "${symbols}" | sort -u)
+            undefined=$(awk 'NF >= 2 && $2 == "U" { print $1 }' <<< "${symbols}" | sort -u)
+            external=$(comm -23 <(printf '%s\n' "${undefined}") <(printf '%s\n' "${defined}"))
+            echo "${lib}: $(tr '\n' ' ' <<< "${external}")"
+            unexpected=$(grep -Ev '^(st25r3916_rfal_[a-z_]+|mem(cpy|move|set|cmp)|__aeabi_[a-z0-9]+)$' <<< "${external}" || true)
+            if [ -n "${unexpected}" ]; then
+              echo "::error::${lib} references $(tr '\n' ' ' <<< "${unexpected}")"
+              status=1
+            fi
+          done
+          exit "${status}"
 
   esp-idf:
     # Builds and links the `esp-idf` platform into the firmware in ci/esp-idf
@@ -215,19 +263,10 @@ jobs:
         run: cargo install ldproxy --locked
       - name: Build and link the firmware
         run: cargo build
-      - name: Reject `esp-idf` together with `embedded-hal`
-        run: |
-          set -uo pipefail
-          log="${RUNNER_TEMP}/esp-idf-embedded-hal.log"
-          if cargo check --features st25r3916-rfal/embedded-hal 2> "${log}"; then
-            echo "::error::esp-idf + embedded-hal built on an ESP-IDF target; expected the compile_error! in src/platform/mod.rs"
-            exit 1
-          fi
-          if ! grep -q 'features both provide the RFAL platform hooks' "${log}"; then
-            cat "${log}"
-            echo "::error::esp-idf + embedded-hal failed for another reason than the intended compile_error!"
-            exit 1
-          fi
+      - name: Check with the no-op `embedded-hal` feature
+        # 0.1 manifests enable `embedded-hal` next to `esp-idf`. Since 0.2 that
+        # feature does nothing and no longer conflicts, so it has to keep building.
+        run: cargo check --features st25r3916-rfal/embedded-hal
 
   docs:
     name: Docs
@@ -247,7 +286,9 @@ jobs:
           key: docs
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # The feature list of [package.metadata.docs.rs] in Cargo.toml.
-      - run: cargo doc --locked --no-deps --features log,embedded-hal
+      - run: cargo doc --locked --no-deps --features log,defmt
+      - name: Private items
+        run: cargo doc --locked --no-deps --document-private-items --features log,defmt
 
   package:
     # What `cargo publish` would upload: packages, verifies the tarball builds
