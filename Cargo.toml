@@ -1,8 +1,11 @@
 [package]
 name = "st25r3916-rfal"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
+# One RFAL per binary: RFAL keeps its state in C globals, so Cargo must refuse to
+# link two copies (e.g. 0.1 and 0.2) into one program.
+links = "rfal"
 description = "Safe Rust wrapper around ST's RFAL C library (v4.0.2) for the ST25R3916 / ST25R3916B NFC reader ICs"
 # The Rust wrapper is MIT OR Apache-2.0; the vendored ST RFAL sources in
 # rfal/ are under ST's SLA0051 (not open source), see rfal/LICENSE-ST.md.
@@ -28,20 +31,29 @@ include = [
 
 [package.metadata.docs.rs]
 # DOCS_RS is set on docs.rs, so build.rs only generates bindings there.
-features = ["log", "embedded-hal"]
+features = ["log", "defmt"]
 targets = ["x86_64-unknown-linux-gnu"]
 
 [features]
 default = ["st25r3916b"]
 
-# Chip variant. Exactly one should be enabled; `st25r3916b` is the default.
-# Use `default-features = false, features = ["st25r3916"]` for the original
-# ST25R3916. If both end up enabled, ST25R3916B is used (with a build warning).
-st25r3916 = []
+# Chip variant (selected at C compile time, so not additive). Exactly one should
+# be enabled; `st25r3916b` is the default. Use `default-features = false,
+# features = ["st25r3916"]` for the original ST25R3916. If both end up enabled,
+# ST25R3916B is used (with a build warning); `NfcReader::new` then reports
+# `HwMismatch` on an ST25R3916 and names the feature to switch.
 st25r3916b = []
+st25r3916 = []
 
-# Forward crate diagnostics to the `log` facade.
+# Crate diagnostics through the `log` facade.
 log = ["dep:log"]
+# Crate diagnostics through defmt, and `defmt::Format` for the public types.
+# Additive with `log`: if both are enabled, diagnostics go to defmt.
+defmt = ["dep:defmt", "embedded-hal/defmt-03"]
+
+# ESP-IDF platform (`platform::esp_idf::EspPlatform`). Only has an effect on
+# ESP-IDF targets (`target_os = "espidf"`).
+esp-idf = ["dep:esp-idf-svc", "dep:esp-idf-hal", "dep:esp-idf-sys"]
 
 # --- Opt-in deviations from ST's upstream RFAL behaviour (see rfal/MODIFICATIONS.md) ---
 # Send an Apple ECP v1 "VAS only" frame whenever NFC-A technology detection finds
@@ -52,22 +64,21 @@ force-wupa = []
 # In poll-only discovery (no listen technologies) keep the RF field on between rounds.
 poll-keep-field-on = []
 
-# ESP-IDF platform layer (SPI/GPIO/timer callbacks, worker thread, `NfcReader::builder`).
-# Only has an effect on ESP-IDF targets (`target_os = "espidf"`).
-esp-idf = ["log", "dep:esp-idf-svc", "dep:esp-idf-sys", "dep:esp-idf-hal", "dep:embedded-hal"]
-
-# Portable platform layer on top of embedded-hal 1.0 (`SpiDevice`, `InputPin`,
-# `DelayNs`) and `critical-section`, for bare-metal targets (STM32, nRF,
-# RP2040, ...); see `platform::embedded_hal`. Mutually exclusive with `esp-idf`
-# on ESP-IDF targets (both export the platform symbols).
-embedded-hal = ["dep:embedded-hal", "dep:critical-section"]
+# No-op since 0.2: the embedded-hal adapter (`Hal`) is always available. Kept so
+# 0.1 manifests that enable it keep building.
+embedded-hal = []
 
 [dependencies]
-strum = { version = "0.28", default-features = false, features = ["derive"] }
-bon = { version = "3.10.3", default-features = false }
+embedded-hal = "1.0.0"
+embedded-hal-async = "1.0.0"
+# The reader singleton flag. `require-cas`: targets without compare-and-swap
+# (thumbv6m) need portable-atomic's `critical-section` feature or
+# `--cfg portable_atomic_unsafe_assume_single_core`, otherwise a clear build error.
+portable-atomic = { version = "1.15.0", default-features = false, features = ["require-cas"] }
 log = { version = "0.4.35", optional = true }
-embedded-hal = { version = "1.0.0", optional = true }
-critical-section = { version = "1.2.0", optional = true }
+defmt = { version = "1.2.0", optional = true }
+# Derives of the generated `ffi` enums; removed in WP1 together with build.rs's strum output.
+strum = { version = "0.28", default-features = false, features = ["derive"] }
 
 [target.'cfg(target_os = "espidf")'.dependencies]
 esp-idf-svc = { version = "0.53.0", features = ["critical-section", "embassy-sync"], optional = true }
@@ -78,7 +89,3 @@ esp-idf-hal = { version = "0.47.0", optional = true }
 bindgen = { version = "0.73.2", features = ["prettyplease"] }
 cc = "1.11"
 glob = "0.3.4"
-
-[dev-dependencies]
-# Host tests of the `embedded-hal` platform need a critical-section implementation.
-critical-section = { version = "1.2.0", features = ["std"] }

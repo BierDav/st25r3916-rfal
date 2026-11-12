@@ -1,345 +1,214 @@
-//! Host unit tests. The RFAL C code is linked in, so this module also
-//! provides stub platform hooks emulating a board with no chip attached
-//! (SPI reads return zeros, timers expire immediately). With the
-//! `embedded-hal` feature the platform module provides the hooks instead
-//! (behaving the same while nothing is installed), and `embedded_hal_platform`
-//! drives it against a simulated chip.
+//! Host tests (WP0 placeholder; WP7 owns this file and `src/tests/**`).
+//!
+//! For now only the error-code tests, which need no RFAL calls. Building this
+//! test binary also links the RFAL C library, which proves that every
+//! `st25r3916_rfal_*` shim symbol is defined.
 
-extern crate std;
+use std::format;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use crate::*;
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use crate::error::check;
+use crate::{Error, PlatformError, RfalError, ffi};
 
-/// RFAL's state and the platform are global: tests that call into RFAL hold
-/// this lock.
-static RFAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn rfal_test_lock() -> std::sync::MutexGuard<'static, ()> {
+/// Serialises the tests that touch process-wide state: the RFAL claim, the
+/// shim session (platform, ISR, deadlines, `RF_TX`) and RFAL's C globals.
+///
+/// Contract for every test module (WP2 `shim`, WP4, WP5, WP7): take it first,
+/// `let _guard = crate::tests::rfal_test_lock();`, in every test that claims,
+/// calls `shim::enter` or a shim, creates an `NfcReader`, or calls into `ffi`.
+/// A poisoned lock (a failed test) is taken over, so one failure does not
+/// cascade.
+pub(crate) fn rfal_test_lock() -> MutexGuard<'static, ()> {
+    static RFAL_TEST_LOCK: Mutex<()> = Mutex::new(());
     RFAL_TEST_LOCK
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Current nesting depth of `platformProtectWorker`.
-#[cfg(not(feature = "embedded-hal"))]
-fn lock_depth() -> i32 {
-    stubs::LOCK_DEPTH.load(Ordering::SeqCst)
-}
+/// Every named `RFAL_ERR_*` constant of the bindings, with its variant.
+const NAMED_CODES: &[(u16, RfalError)] = &[
+    (ffi::RFAL_ERR_NOMEM, RfalError::NoMemory),
+    (ffi::RFAL_ERR_BUSY, RfalError::Busy),
+    (ffi::RFAL_ERR_IO, RfalError::Io),
+    (ffi::RFAL_ERR_TIMEOUT, RfalError::Timeout),
+    (ffi::RFAL_ERR_REQUEST, RfalError::Request),
+    (ffi::RFAL_ERR_NOMSG, RfalError::NoMessage),
+    (ffi::RFAL_ERR_PARAM, RfalError::Param),
+    (ffi::RFAL_ERR_SYSTEM, RfalError::System),
+    (ffi::RFAL_ERR_FRAMING, RfalError::Framing),
+    (ffi::RFAL_ERR_OVERRUN, RfalError::Overrun),
+    (ffi::RFAL_ERR_PROTO, RfalError::Protocol),
+    (ffi::RFAL_ERR_INTERNAL, RfalError::Internal),
+    (ffi::RFAL_ERR_AGAIN, RfalError::Again),
+    (ffi::RFAL_ERR_MEM_CORRUPT, RfalError::MemoryCorrupt),
+    (ffi::RFAL_ERR_NOT_IMPLEMENTED, RfalError::NotImplemented),
+    (ffi::RFAL_ERR_PC_CORRUPT, RfalError::ProgramCounterCorrupt),
+    (ffi::RFAL_ERR_SEND, RfalError::Send),
+    (ffi::RFAL_ERR_IGNORE, RfalError::Ignore),
+    (ffi::RFAL_ERR_SEMANTIC, RfalError::Semantic),
+    (ffi::RFAL_ERR_SYNTAX, RfalError::Syntax),
+    (ffi::RFAL_ERR_CRC, RfalError::Crc),
+    (ffi::RFAL_ERR_NOTFOUND, RfalError::NotFound),
+    (ffi::RFAL_ERR_NOTUNIQUE, RfalError::NotUnique),
+    (ffi::RFAL_ERR_NOTSUPP, RfalError::NotSupported),
+    (ffi::RFAL_ERR_WRITE, RfalError::Write),
+    (ffi::RFAL_ERR_FIFO, RfalError::Fifo),
+    (ffi::RFAL_ERR_PAR, RfalError::Parity),
+    (ffi::RFAL_ERR_DONE, RfalError::Done),
+    (ffi::RFAL_ERR_RF_COLLISION, RfalError::Collision),
+    (ffi::RFAL_ERR_HW_OVERRUN, RfalError::HwOverrun),
+    (ffi::RFAL_ERR_RELEASE_REQ, RfalError::ReleaseRequest),
+    (ffi::RFAL_ERR_SLEEP_REQ, RfalError::SleepRequest),
+    (ffi::RFAL_ERR_WRONG_STATE, RfalError::WrongState),
+    (ffi::RFAL_ERR_MAX_RERUNS, RfalError::MaxReruns),
+    (ffi::RFAL_ERR_DISABLED, RfalError::Disabled),
+    (ffi::RFAL_ERR_HW_MISMATCH, RfalError::HwMismatch),
+    (ffi::RFAL_ERR_LINK_LOSS, RfalError::LinkLoss),
+    (ffi::RFAL_ERR_INVALID_HANDLE, RfalError::InvalidHandle),
+    (ffi::RFAL_ERR_INCOMPLETE_BYTE, RfalError::IncompleteByte(0)),
+    (
+        ffi::RFAL_ERR_INCOMPLETE_BYTE_01,
+        RfalError::IncompleteByte(1),
+    ),
+    (
+        ffi::RFAL_ERR_INCOMPLETE_BYTE_02,
+        RfalError::IncompleteByte(2),
+    ),
+    (
+        ffi::RFAL_ERR_INCOMPLETE_BYTE_03,
+        RfalError::IncompleteByte(3),
+    ),
+    (
+        ffi::RFAL_ERR_INCOMPLETE_BYTE_04,
+        RfalError::IncompleteByte(4),
+    ),
+    (
+        ffi::RFAL_ERR_INCOMPLETE_BYTE_05,
+        RfalError::IncompleteByte(5),
+    ),
+    (
+        ffi::RFAL_ERR_INCOMPLETE_BYTE_06,
+        RfalError::IncompleteByte(6),
+    ),
+    (
+        ffi::RFAL_ERR_INCOMPLETE_BYTE_07,
+        RfalError::IncompleteByte(7),
+    ),
+];
 
-/// Current nesting depth of `platformProtectWorker`.
-#[cfg(feature = "embedded-hal")]
-fn lock_depth() -> i32 {
-    crate::platform::embedded_hal::test_support::worker_depth() as i32
-}
-
-#[cfg(feature = "embedded-hal")]
-mod embedded_hal_platform;
-
-#[cfg(not(feature = "embedded-hal"))]
-mod stubs {
-    use core::sync::atomic::{AtomicI32, Ordering};
-
-    pub static LOCK_DEPTH: AtomicI32 = AtomicI32::new(0);
-
-    #[unsafe(no_mangle)]
-    extern "C" fn platformSpiSelect() {}
-    #[unsafe(no_mangle)]
-    extern "C" fn platformSpiDeselect() {}
-    #[unsafe(no_mangle)]
-    unsafe extern "C" fn platformSpiTxRx(_tx: *const u8, rx: *mut u8, len: u16) {
-        if !rx.is_null() {
-            unsafe { core::ptr::write_bytes(rx, 0, len as usize) };
-        }
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn platformIrqST25RPinInitialize() {}
-    #[unsafe(no_mangle)]
-    extern "C" fn platformIrqST25RSetCallback(_cb: Option<unsafe extern "C" fn()>) {}
-    #[unsafe(no_mangle)]
-    extern "C" fn platformGpioIsHigh(_port: u32, _pin: u32) -> bool {
-        false
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn platformProtectST25RComm() {}
-    #[unsafe(no_mangle)]
-    extern "C" fn platformUnprotectST25RComm() {}
-    #[unsafe(no_mangle)]
-    extern "C" fn platformProtectST25RIrqStatus() {}
-    #[unsafe(no_mangle)]
-    extern "C" fn platformUnprotectST25RIrqStatus() {}
-    #[unsafe(no_mangle)]
-    extern "C" fn platformProtectWorker() {
-        LOCK_DEPTH.fetch_add(1, Ordering::SeqCst);
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn platformUnprotectWorker() {
-        LOCK_DEPTH.fetch_sub(1, Ordering::SeqCst);
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn platformDelay(_ms: u32) {}
-    #[unsafe(no_mangle)]
-    extern "C" fn platformTimerCreate(_ms: u32) -> u32 {
-        0
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn platformTimerIsExpired(_timer: u32) -> bool {
-        true
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn platformTimerGetRemaining(_timer: u32) -> u32 {
-        0
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn platformTimerDestroy(_timer: u32) {}
-    #[unsafe(no_mangle)]
-    extern "C" fn platformErrorHandle() {}
-}
-
-struct CountingDriver(Arc<AtomicI32>);
-
-/// Results of reader calls made from inside a state callback.
-type CallResults = Arc<std::sync::Mutex<alloc::vec::Vec<(&'static str, Result<(), RfalError>)>>>;
-
-struct NoopHandle;
-
-impl WorkerHandle for NoopHandle {
-    fn join(self: Box<Self>) {}
-}
-
-impl WorkerDriver for CountingDriver {
-    fn spawn(
-        &self,
-        _worker_fn: fn(),
-        _should_continue: Arc<AtomicBool>,
-    ) -> Result<Box<dyn WorkerHandle>, RfalError> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(NoopHandle))
-    }
-}
-
+/// Takes the addresses of RFAL's entry points, so the linker must pull in the
+/// RFAL objects and resolve their references to the `st25r3916_rfal_*` shims
+/// (without this, an unused static library is never searched). Nothing is
+/// called.
 #[test]
-fn rfal_result_maps_codes() {
-    assert_eq!(rfal_result(0), Ok(()));
-    assert_eq!(rfal_result(RfalError::Busy as u16), Err(RfalError::Busy));
-    assert_eq!(
-        rfal_result(crate::rfal::RFAL_ERR_TIMEOUT),
-        Err(RfalError::Timeout)
-    );
-    assert_eq!(
-        rfal_result(crate::rfal::RFAL_ERR_WRONG_STATE),
-        Err(RfalError::WrongState)
-    );
-    // Unknown codes from C are reported as Internal rather than panicking.
-    assert_eq!(rfal_result(0xFFFF), Err(RfalError::Internal));
+fn rfal_links_against_the_shims() {
+    let _guard = rfal_test_lock();
+    let entry_points = [
+        ffi::rfalNfcInitialize as *const (),
+        ffi::rfalNfcDiscover as *const (),
+        ffi::rfalNfcWorker as *const (),
+        ffi::rfalNfcGetDevicesFound as *const (),
+        ffi::rfalNfcSelect as *const (),
+        ffi::rfalNfcDataExchangeStart as *const (),
+        ffi::rfalNfcDataExchangeGetStatus as *const (),
+        ffi::rfalNfcDeactivate as *const (),
+        ffi::rfalDeinitialize as *const (),
+    ];
+    for f in entry_points {
+        assert!(!std::hint::black_box(f).is_null());
+    }
 }
 
 #[test]
 fn error_codes_match_c_defines() {
-    assert_eq!(u16::from(RfalError::Nomem), crate::rfal::RFAL_ERR_NOMEM);
-    assert_eq!(u16::from(RfalError::Param), crate::rfal::RFAL_ERR_PARAM);
-    assert_eq!(
-        u16::from(RfalError::LinkLoss),
-        crate::rfal::RFAL_ERR_LINK_LOSS
-    );
-    assert_eq!(
-        RfalError::try_from(crate::rfal::RFAL_ERR_CRC),
-        Ok(RfalError::Crc)
-    );
-    assert_eq!(RfalError::try_from(9999u16), Err(()));
-}
-
-#[test]
-fn generated_enums_round_trip() {
-    use crate::rfal as c;
-    let states = [
-        (c::rfalNfcState_RFAL_NFC_STATE_IDLE, RfalNfcState::Idle),
-        (
-            c::rfalNfcState_RFAL_NFC_STATE_POLL_SELECT,
-            RfalNfcState::PollSelect,
-        ),
-        (
-            c::rfalNfcState_RFAL_NFC_STATE_ACTIVATED,
-            RfalNfcState::Activated,
-        ),
-        (
-            c::rfalNfcState_RFAL_NFC_STATE_DEACTIVATION,
-            RfalNfcState::Deactivation,
-        ),
-    ];
-    for (raw, state) in states {
-        assert_eq!(RfalNfcState::try_from(raw), Ok(state));
-        assert_eq!(c::rfalNfcState::from(state), raw);
+    for &(code, err) in NAMED_CODES {
+        assert_eq!(err.code(), code, "{err:?}");
+        assert_eq!(RfalError::from_code(code), Some(err), "code {code}");
+        assert_eq!(check(code), Err(err));
     }
-    assert_eq!(RfalNfcState::try_from(0xDEAD_u32), Err(()));
-
-    assert_eq!(
-        u32::from(RfalNfcDeactivateType::Discovery),
-        c::rfalNfcDeactivateType_RFAL_NFC_DEACTIVATE_DISCOVERY
-    );
-    assert_eq!(
-        u32::from(RfalComplianceMode::Emv),
-        c::rfalComplianceMode_RFAL_COMPLIANCE_MODE_EMV
-    );
-    assert_eq!(
-        RfalNfcDevType::try_from(c::rfalNfcDevType_RFAL_NFC_LISTEN_TYPE_NFCA),
-        Ok(RfalNfcDevType::ListenTypeNfca)
-    );
 }
 
 #[test]
-fn strum_display_and_parse() {
-    use core::str::FromStr;
-    assert_eq!(std::format!("{}", RfalNfcState::PollSelect), "PollSelect");
-    assert_eq!(RfalError::from_str("Timeout"), Ok(RfalError::Timeout));
+fn success_is_not_an_error() {
+    assert_eq!(ffi::RFAL_ERR_NONE, 0);
+    assert_eq!(RfalError::from_code(ffi::RFAL_ERR_NONE), None);
+    assert_eq!(check(ffi::RFAL_ERR_NONE), Ok(()));
 }
 
 #[test]
-fn poll_tech_bit_ops() {
-    let ab = PollTech::A | PollTech::B;
-    assert_eq!(
-        ab.0,
-        (crate::rfal::RFAL_NFC_POLL_TECH_A | crate::rfal::RFAL_NFC_POLL_TECH_B) as u16
-    );
-    assert!(ab.contains(PollTech::A));
-    assert!(ab.contains(PollTech::B));
-    assert!(!ab.contains(PollTech::F));
-    assert!(ab.contains(PollTech::NONE));
-    assert_eq!(PollTech::A.union(PollTech::B), ab);
-
-    let mut t = PollTech::default();
-    t |= PollTech::V;
-    assert_eq!(u16::from(t), PollTech::V.0);
-
-    let l = ListenTech::A | ListenTech::F;
-    assert!(l.contains(ListenTech::F) && !l.contains(ListenTech::B));
+fn every_code_round_trips() {
+    for code in 1..=u16::MAX {
+        let err = RfalError::from_code(code).expect("only 0 is success");
+        assert_eq!(err.code(), code);
+    }
 }
 
 #[test]
-fn discovery_config_defaults() {
-    let cfg = RfalDiscoveryConfig::default();
-    assert_eq!(cfg.techs2_find, PollTech::A.0);
-    assert_eq!(cfg.comp_mode, RfalComplianceMode::Iso);
-    assert_eq!(cfg.dev_limit, 1);
-    assert!(cfg.on_state_change.is_none());
-
-    let cfg = RfalDiscoveryConfig::builder()
-        .techs2_find(PollTech::A | PollTech::V)
-        .total_duration(500)
-        .on_state_change(|_s: RfalNfcState| {})
-        .build();
-    assert_eq!(cfg.total_duration, 500);
-    assert!(cfg.on_state_change.is_some());
+fn unknown_codes_are_kept() {
+    // 39 is a gap between RFAL_ERR_INVALID_HANDLE and RFAL_ERR_INCOMPLETE_BYTE.
+    assert_eq!(RfalError::from_code(39), Some(RfalError::Unknown(39)));
+    assert_eq!(RfalError::from_code(48), Some(RfalError::Unknown(48)));
+    assert_eq!(
+        RfalError::from_code(0xFFFF),
+        Some(RfalError::Unknown(0xFFFF))
+    );
+    // Only the low three bits of an out-of-range bit count are used.
+    assert_eq!(RfalError::IncompleteByte(9).code(), 41);
 }
 
-/// Calls into RFAL with no chip attached.
 #[test]
-fn reader_lifecycle_without_chip() {
-    let _lock = rfal_test_lock();
-    #[cfg(feature = "embedded-hal")]
-    crate::platform::embedded_hal::EmbeddedHalPlatform::uninstall().unwrap();
-
-    let spawned = Arc::new(AtomicI32::new(0));
-    let mut reader = NfcReader::new(Box::new(CountingDriver(spawned.clone())));
-
-    // Everything but start() requires a started reader.
+fn display_messages() {
+    assert_eq!(format!("{}", RfalError::Timeout), "timeout");
     assert_eq!(
-        reader.get_active_device().err(),
-        Some(RfalError::WrongState)
+        format!("{}", RfalError::IncompleteByte(3)),
+        "incomplete last byte (3 valid bits)"
     );
     assert_eq!(
-        reader.start_discovery(RfalDiscoveryConfig::default()),
-        Err(RfalError::WrongState)
+        format!("{}", RfalError::Unknown(99)),
+        "unknown RFAL error code 99"
     );
     assert_eq!(
-        reader.get_apdu_transceive_status(),
-        Err(RfalError::WrongState)
+        format!("{}", Error::Rfal(RfalError::Crc)),
+        "RFAL error: CRC error"
     );
-    assert_eq!(reader.stop(), Ok(()));
     assert_eq!(
-        reader.get_apdu_transceive_result(),
-        Ok(alloc::vec::Vec::new())
+        format!("{}", Error::Platform(PlatformError::Other)),
+        "platform error: platform failure"
     );
 
-    // No chip answers on the stub SPI bus: initialisation must fail cleanly
-    // without spawning the worker or leaving the reader half-started.
-    let err = reader.start().expect_err("start must fail without a chip");
-    assert_ne!(err, RfalError::None);
-    assert!(!reader.is_started());
-    assert_eq!(spawned.load(Ordering::SeqCst), 0);
-    assert_eq!(lock_depth(), 0, "unbalanced RFAL lock");
-
-    // A failed start releases the global "started" claim.
-    let mut other = NfcReader::new(Box::new(CountingDriver(spawned.clone())));
-    assert_ne!(other.start(), Err(RfalError::WrongState));
-    drop(other);
-    drop(reader);
-    assert_eq!(lock_depth(), 0);
+    // The HwMismatch hint names the feature that selects the other variant.
+    let hint = format!("{}", RfalError::HwMismatch);
+    if cfg!(feature = "st25r3916b") {
+        assert!(
+            hint.contains("ST25R3916B") && hint.contains("\"st25r3916\""),
+            "{hint}"
+        );
+    } else {
+        assert!(hint.contains("`st25r3916b`"), "{hint}");
+    }
+    for &(code, _) in NAMED_CODES {
+        let err = RfalError::from_code(code).unwrap();
+        assert!(!format!("{err}").is_empty(), "{err:?}");
+    }
 }
 
-/// The state callback re-entering the reader through the (re-entrant) RFAL
-/// lock must not be able to free itself or stop/start the worker. Drives the
-/// trampoline directly, as RFAL's worker would (no chip needed); the
-/// `embedded-hal` tests repeat this through a real worker iteration.
 #[test]
-fn state_callback_reentry_is_rejected() {
-    use std::sync::Mutex;
+fn conversions() {
+    use embedded_hal::spi::ErrorKind;
 
-    let _lock = rfal_test_lock();
-    #[cfg(feature = "embedded-hal")]
-    crate::platform::embedded_hal::EmbeddedHalPlatform::uninstall().unwrap();
-
-    let spawned = Arc::new(AtomicI32::new(0));
-    let reader = Arc::new(Mutex::new(NfcReader::new(Box::new(CountingDriver(
-        spawned.clone(),
-    )))));
-    let results: CallResults = Arc::default();
-    let calls = Arc::new(AtomicI32::new(0));
-
-    let (r, res, n) = (reader.clone(), results.clone(), calls.clone());
-    let cb = Box::into_raw(Box::new(CallbackWrapper {
-        cb: Box::new(move |_state: RfalNfcState| {
-            n.fetch_add(1, Ordering::SeqCst);
-            let mut reader = r.lock().unwrap();
-            let mut res = res.lock().unwrap();
-            res.push((
-                "start_discovery",
-                reader.start_discovery(RfalDiscoveryConfig::default()),
-            ));
-            // Outside the callback, stop() on a stopped reader is Ok and
-            // start() fails with a chip error, not WrongState.
-            res.push(("stop", reader.stop()));
-            res.push(("start", reader.start()));
-            // Nested worker / trampoline calls must not run the callback
-            // again (that would alias the running closure).
-            reader.worker();
-            unsafe { state_change_trampoline(RfalNfcState::Idle.into()) };
-        }),
-    }));
-    with_lock(|| unsafe { replace_state_callback(cb) });
-
-    // What RFAL's worker does: invoke the trampoline with the lock held.
-    with_lock(|| unsafe { state_change_trampoline(RfalNfcState::Activated.into()) });
-
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "nested callback ran");
+    assert_eq!(Error::from(RfalError::Busy), Error::Rfal(RfalError::Busy));
     assert_eq!(
-        *results.lock().unwrap(),
-        [
-            ("start_discovery", Err(RfalError::WrongState)),
-            ("stop", Err(RfalError::WrongState)),
-            ("start", Err(RfalError::WrongState)),
-        ]
+        PlatformError::from(ErrorKind::ModeFault),
+        PlatformError::Spi(ErrorKind::ModeFault)
     );
-    assert_eq!(spawned.load(Ordering::SeqCst), 0);
-    // The callback was not replaced or freed from inside itself.
-    assert_eq!(STATE_CALLBACK.load(Ordering::SeqCst), cb);
-    assert!(!IN_STATE_CALLBACK.load(Ordering::SeqCst));
-    assert_eq!(lock_depth(), 0, "unbalanced RFAL lock");
+    assert_eq!(
+        Error::from(PlatformError::Other),
+        Error::Platform(PlatformError::Other)
+    );
 
-    // Outside the callback the same calls behave normally again.
-    assert_eq!(reader.lock().unwrap().stop(), Ok(()));
-    assert_ne!(reader.lock().unwrap().start(), Err(RfalError::WrongState));
-
-    with_lock(|| unsafe { replace_state_callback(ptr::null_mut()) });
+    fn assert_error<E: core::error::Error + Send + Sync + 'static>() {}
+    assert_error::<Error>();
+    assert_error::<RfalError>();
+    assert_error::<PlatformError>();
+    assert_error::<crate::NewError<()>>();
 }

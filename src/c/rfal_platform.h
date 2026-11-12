@@ -1,10 +1,17 @@
 /*
  * RFAL platform configuration for the `st25r3916-rfal` Rust crate.
  *
- * This header is included by every RFAL source file (via rfal_features.h).
- * It declares the platform hooks that the *final application* has to provide
- * (normally as `#[unsafe(no_mangle)] extern "C"` Rust functions, see the crate docs
- * for the full contract) and fixes the RFAL feature configuration.
+ * This header is included by every RFAL source file (via rfal_features.h,
+ * before rfal_defConfig.h applies its `#ifndef` defaults, so the macros below
+ * take precedence). It maps RFAL's platform hooks onto private shims that the
+ * crate itself defines in `src/shim.rs` (all prefixed `st25r3916_rfal_`, so
+ * they never clash with hooks an application defines for another ST stack, or
+ * forgot to delete after 0.1), and fixes the RFAL feature configuration.
+ *
+ * Execution model (see the crate docs and `src/shim.rs`): every RFAL call is
+ * made by the owner of the `NfcReader`, and RFAL's ISR (`st25r3916Isr`) only
+ * runs inside those calls, never from an interrupt. So nothing in RFAL is ever
+ * concurrent and all protection hooks are empty.
  *
  * The header is deliberately freestanding: it only needs <stdint.h>,
  * <stdbool.h> and <stddef.h>, which every C compiler ships even without a
@@ -37,40 +44,72 @@
 #define platformLedToggle( port, pin )
 
 /* -------------------------------------------------------------------------- */
-/* 2. Timing                                                                  */
+/* 2. SPI framing                                                             */
 /* -------------------------------------------------------------------------- */
-extern void     platformDelay( uint32_t ms );
-extern uint32_t platformTimerCreate( uint32_t ms );
-extern bool     platformTimerIsExpired( uint32_t timer );
-extern void     platformTimerDestroy( uint32_t timer );
-extern uint32_t platformTimerGetRemaining( uint32_t timer );
+/*
+ * Always build ST's "single TxRx" mode: every chip-select window is exactly one
+ * `platformSpiTxRx` call on a <= 513 byte frame (st25r3916_com.c), with only two
+ * shapes: (buf, NULL, len) and (buf, buf, len). So one window is one
+ * `Platform::spi_write` / `Platform::spi_transfer` call, i.e. one embedded-hal
+ * `SpiDevice` transaction, which also works with hardware chip select.
+ */
+#ifndef ST25R_COM_SINGLETXRX
+#define ST25R_COM_SINGLETXRX
+#endif
 
 /* -------------------------------------------------------------------------- */
-/* 3. SPI                                                                     */
+/* 3. Shims, defined in Rust (src/shim.rs)                                    */
 /* -------------------------------------------------------------------------- */
-extern void platformSpiSelect( void );
-extern void platformSpiDeselect( void );
-/* `tx` and `rx` may point to the same buffer; `rx` may be NULL (discard). */
-extern void platformSpiTxRx( const uint8_t* tx, uint8_t* rx, uint16_t len );
+/* One SPI frame: rx NULL -> write only; rx == tx -> in-place transfer; else tx is copied to rx first. */
+extern void     st25r3916_rfal_spi_txrx( const uint8_t* tx, uint8_t* rx, uint16_t len );
+/* Level of the chip's IRQ line (true = an unmasked interrupt is pending). */
+extern bool     st25r3916_rfal_irq_is_high( void );
+/* Stores RFAL's ISR (`st25r3916Isr`); the shims call it when the IRQ line is high. */
+extern void     st25r3916_rfal_set_isr( void (*isr)( void ) );
+/* Calls the stored ISR while the IRQ line is high (not nested). */
+extern void     st25r3916_rfal_service_irq( void );
+/* Blocking delay. */
+extern void     st25r3916_rfal_delay_ms( uint32_t ms );
+/* Timer handle = wrapping deadline `now_ms + ms`; no allocation, nothing to destroy. */
+extern uint32_t st25r3916_rfal_timer_create( uint32_t ms );
+/* Also services a pending IRQ and records the earliest unexpired deadline. */
+extern bool     st25r3916_rfal_timer_expired( uint32_t timer );
+extern uint32_t st25r3916_rfal_timer_remaining( uint32_t timer );
+/* RFAL detected a driver/communication fault (it also returns an error code). */
+extern void     st25r3916_rfal_error( void );
 
 /* -------------------------------------------------------------------------- */
-/* 4. IRQ line and mutual exclusion                                           */
+/* 4. RFAL hooks                                                              */
 /* -------------------------------------------------------------------------- */
-extern void platformIrqST25RPinInitialize( void );
-extern void platformIrqST25RSetCallback( void (*cb)( void ) );
+/* The chip-select window *is* the spi_txrx call (SINGLETXRX). */
+#define platformSpiSelect()
+#define platformSpiDeselect()
+#define platformSpiTxRx( tx, rx, len )      st25r3916_rfal_spi_txrx( (tx), (rx), (len) )
+
+/* The platform configures its own IRQ pin; the line is only read, never an interrupt source for RFAL. */
+#define platformIrqST25RPinInitialize()
+#define platformIrqST25RSetCallback( cb )   st25r3916_rfal_set_isr( (cb) )
 /* Only ever called with (ST25R_INT_PORT, ST25R_INT_PIN): "is the IRQ line high?" */
-extern bool platformGpioIsHigh( uint32_t port, uint32_t pin );
+#define platformGpioIsHigh( port, pin )     st25r3916_rfal_irq_is_high()
 #define ST25R_INT_PORT 0U
 #define ST25R_INT_PIN  0U
 
-extern void platformProtectST25RComm( void );
-extern void platformUnprotectST25RComm( void );
-extern void platformProtectST25RIrqStatus( void );
-extern void platformUnprotectST25RIrqStatus( void );
-extern void platformProtectWorker( void );
-extern void platformUnprotectWorker( void );
+/* No locks: the ISR never preempts an SPI frame or a status reader, and only one owner runs RFAL. */
+#define platformProtectST25RComm()
+#define platformUnprotectST25RComm()
+#define platformProtectST25RIrqStatus()
+#define platformUnprotectST25RIrqStatus()
+/* Runs at every rfalWorker() entry (including rfalRunBlocking loops): service a pending IRQ. */
+#define platformProtectWorker()             st25r3916_rfal_service_irq()
+#define platformUnprotectWorker()
 
-extern void platformErrorHandle( void );
+#define platformDelay( ms )                 st25r3916_rfal_delay_ms( (ms) )
+#define platformTimerCreate( ms )           st25r3916_rfal_timer_create( (ms) )
+#define platformTimerIsExpired( t )         st25r3916_rfal_timer_expired( (t) )
+#define platformTimerGetRemaining( t )      st25r3916_rfal_timer_remaining( (t) )
+#define platformTimerDestroy( t )           ((void)(t))
+
+#define platformErrorHandle()               st25r3916_rfal_error()
 
 /* -------------------------------------------------------------------------- */
 /* 5. RFAL feature configuration                                              */
