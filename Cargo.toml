@@ -25,6 +25,7 @@ include = [
     "/rfal/LICENSE-ST.md",
     "/rfal/MODIFICATIONS.md",
     "/README.md",
+    "/MIGRATION.md",
     "/LICENSE-MIT",
     "/LICENSE-APACHE",
 ]
