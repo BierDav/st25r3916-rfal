@@ -552,6 +552,50 @@ fn rf_frame_wait_time_defaults_to_20_ms_and_can_be_set() {
     finish(&board);
 }
 
+/// A frame wait time of zero would be RFAL's "no response timeout: wait
+/// forever" (`rfal_rfst25r3916.c:1397`, `1420-1423`). Anything up to the
+/// listener's minimum response time (NFC-A: 1172/fc, about 86 µs) is
+/// rejected with `Param` before anything is sent, and never hangs.
+#[test]
+fn rf_frame_wait_time_must_exceed_the_listener_fdt() {
+    let _guard = rfal_test_lock();
+    let board = board(Some(NfcATag::t2t(&UID7)));
+    let mut r = reader(&board);
+    let mut dev = discover(&mut r, &board, &config());
+    let sent = board.lock().rf_log.len();
+
+    for fwt in [
+        Duration::ZERO,
+        Duration::from_nanos(1),
+        Duration::from_micros(50),
+    ] {
+        dev.set_rf_frame_wait_time(fwt);
+        assert_eq!(
+            dev.blocking_transceive(&[0x30, 4]).err(),
+            Some(Error::Rfal(RfalError::Param)),
+            "frame wait time {fwt:?}"
+        );
+        let (res, _) = poll_by_hand(dev.transceive(&[0x30, 4]));
+        assert_eq!(
+            res.err(),
+            Some(Error::Rfal(RfalError::Param)),
+            "async, {fwt:?}"
+        );
+    }
+    assert_eq!(board.lock().rf_log.len(), sent, "nothing was sent");
+
+    // Just above NFC-A's FDT: accepted.
+    dev.set_rf_frame_wait_time(Duration::from_micros(100));
+    let data = dev
+        .blocking_transceive(&[0x30, 4])
+        .expect("READ with a 100 µs frame wait time")
+        .to_vec();
+    assert_eq!(data, t2t_bytes(16));
+    drop(dev);
+    drop(r);
+    finish(&board);
+}
+
 // ---------------------------------------------------------------------------
 // ISO-DEP (T4T)
 // ---------------------------------------------------------------------------

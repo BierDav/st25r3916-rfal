@@ -213,9 +213,16 @@ impl<'r, P: Platform> Device<'r, P> {
         self.last_rx_bits
     }
 
-    /// Frame wait time for RF-interface exchanges (default 20 ms). Ignored
-    /// for ISO-DEP and NFC-DEP, which use the negotiated values. Saturates at
-    /// about 64 s.
+    /// Frame wait time for RF-interface exchanges (default 20 ms): how long
+    /// RFAL waits for a response to begin. Ignored for ISO-DEP and NFC-DEP,
+    /// which use the negotiated values. Saturates at about 64 s.
+    ///
+    /// It must be longer than the technology's minimum response time
+    /// (RFAL's FDT listen: about 86 µs for NFC-A, 74 µs for NFC-B and
+    /// ST25TB, 197 µs for NFC-F, 318 µs for NFC-V). With a shorter one,
+    /// including [`Duration::ZERO`], `transceive` fails with
+    /// [`RfalError::Param`] without sending anything. (RFAL reads a frame
+    /// wait time of zero as "no timeout"; it never gets one.)
     pub fn set_rf_frame_wait_time(&mut self, fwt: Duration) {
         self.rf_fwt = fwt_cycles(fwt);
     }
@@ -388,12 +395,16 @@ impl<'r, P: Platform> Device<'r, P> {
     }
 }
 
-/// An RF frame wait time in RFAL's 1/fc units (fc = 13.56 MHz), saturated
-/// at [`MAX_RF_FWT`].
+/// An RF frame wait time in RFAL's 1/fc units (fc = 13.56 MHz): at least 1,
+/// since RFAL reads 0 as "no response timeout, wait forever"
+/// (`rfal_rfst25r3916.c:1397`, `1420-1423`, no sanity timer either, `1929`),
+/// and saturated at [`MAX_RF_FWT`]. RFAL refuses values up to the
+/// technology's FDT listen (`rfal_rfst25r3916.c:1401-1404`), so the clamped
+/// ones never reach the chip.
 fn fwt_cycles(fwt: Duration) -> u32 {
     // ns × 13.56 / 1000 = ns × 1356 / 100 000 carrier cycles.
     let cycles = fwt.as_nanos().saturating_mul(1356) / 100_000;
-    u32::try_from(cycles).map_or(MAX_RF_FWT, |c| c.min(MAX_RF_FWT))
+    u32::try_from(cycles).map_or(MAX_RF_FWT, |c| c.clamp(1, MAX_RF_FWT))
 }
 
 /// Size of a response RFAL reported as `raw_len` (`*rvdLen`), as `(bytes,
@@ -454,7 +465,15 @@ mod tests {
         assert_eq!(DEFAULT_RF_FWT, 271_200);
         assert_eq!(fwt_cycles(Duration::from_millis(1)), FC_PER_MS);
         assert_eq!(fwt_cycles(Duration::from_micros(100)), 1356);
-        assert_eq!(fwt_cycles(Duration::ZERO), 0);
+        // Never 0, RFAL's "no timeout": what is too short for RFAL (up to
+        // its FDT listen, ≥ 1008/fc) makes `transceive` fail with `Param`.
+        assert_eq!(fwt_cycles(Duration::ZERO), 1);
+        assert_eq!(fwt_cycles(Duration::from_nanos(73)), 1);
+        assert_eq!(fwt_cycles(Duration::from_nanos(148)), 2);
+        const {
+            assert!(ffi::RFAL_FDT_LISTEN_NFCB_POLLER > 1);
+            assert!(ffi::RFAL_FDT_LISTEN_NFCB_POLLER < ffi::RFAL_FDT_LISTEN_NFCA_POLLER);
+        }
         // RFAL's 16-bit ms sanity timer bounds it; never RFAL_FWT_NONE.
         assert_eq!(fwt_cycles(Duration::from_secs(60)), 60_000 * FC_PER_MS);
         assert_eq!(fwt_cycles(Duration::from_secs(65)), MAX_RF_FWT);
