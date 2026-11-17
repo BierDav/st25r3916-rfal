@@ -39,6 +39,20 @@ const UID4: [u8; 4] = [0x08, 0x12, 0x34, 0x56];
 const UID7: [u8; 7] = [0x04, 0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6];
 const UID10: [u8; 10] = [0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
 
+/// REQA (first byte of the 7-bit short frame).
+const REQA: u8 = 0x26;
+/// WUPA.
+const WUPA: u8 = 0x52;
+/// The short frame NFC-A technology detection sends: REQA, or WUPA with
+/// `force-wupa`.
+const SENS_REQ: u8 = if cfg!(feature = "force-wupa") {
+    WUPA
+} else {
+    REQA
+};
+/// The PCB of an ISO-DEP S(DESELECT) without CID.
+const S_DESELECT: u8 = 0xC2;
+
 /// SELECT by AID (NDEF application).
 const SELECT_NDEF: [u8; 13] = [
     0x00, 0xA4, 0x04, 0x00, 0x07, 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01, 0x00,
@@ -369,12 +383,14 @@ fn blocking_discover_activates_a_t2t_with_a_7_byte_uid() {
             chip.field_on(),
             "the field stays on while a device is active"
         );
-        // Defaults: NFC compliance mode sends SLP_REQ after REQA, and B, F
-        // and V are polled too.
+        // Defaults: NFC compliance mode sends SLP_REQ after REQA (WUPA with
+        // `force-wupa`), then WUPA again, and B, F and V are polled too.
         let sent = |first: u8| chip.rf_frames_starting_with(first) > 0;
-        assert!(
-            sent(0x26) && sent(0x50) && sent(0x52),
-            "REQA, SLP_REQ, WUPA"
+        assert!(sent(0x50) && sent(0x52), "SLP_REQ, WUPA");
+        assert_eq!(
+            sent(REQA),
+            !cfg!(feature = "force-wupa"),
+            "technology detection sends REQA, or WUPA with `force-wupa`"
         );
         assert!(sent(0x05), "NFC-B polled (SENSB_REQ)");
         assert!(sent(0x00), "NFC-F polled (SENSF_REQ)");
@@ -598,7 +614,7 @@ fn iso_dep_t4t_apdu_round_trip() {
     drop(dev);
     let chip = board.lock();
     assert!(
-        chip.rf_frames_starting_with(0xC2) > 0,
+        chip.rf_frames_starting_with(S_DESELECT) > 0,
         "dropping an ISO-DEP device sends S(DESELECT)"
     );
     assert!(
@@ -676,7 +692,10 @@ fn async_deactivate_polled_by_hand() {
             chip.waits_blocking, blocking_waits,
             "async deactivate never blocks"
         );
-        assert!(chip.rf_frames_starting_with(0xC2) > 0, "S(DESELECT) sent");
+        assert!(
+            chip.rf_frames_starting_with(S_DESELECT) > 0,
+            "S(DESELECT) sent"
+        );
         assert!(!chip.field_on());
     }
     assert_eq!(rfal_state(&mut r), ffi::rfalNfcState_RFAL_NFC_STATE_IDLE);
@@ -713,7 +732,10 @@ fn discover_times_out_with_no_device() {
             elapsed < 400,
             "NoDevice only after {elapsed} ms (timeout 300 ms, field already off)"
         );
-        assert!(chip.rf_frames_starting_with(0x26) > 0, "it polled (REQA)");
+        assert!(
+            chip.rf_frames_starting_with(SENS_REQ) > 0,
+            "it polled (REQA, or WUPA with `force-wupa`)"
+        );
         assert!(!chip.field_on(), "NoDevice leaves the field off");
         assert!(
             chip.waits_blocking > 0 && chip.waits_async == 0,
