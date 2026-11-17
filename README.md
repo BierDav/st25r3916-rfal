@@ -383,9 +383,9 @@ against a timer. RFAL stays consistent:
 | Dropped | Effect |
 |---|---|
 | `discover` future | Discovery stops, the field goes off and RFAL is idle again. This blocks for a few milliseconds, because the field stays off for the minimum tFIELD_OFF of 5 ms. |
-| `transceive` future | The next `transceive` or `deactivate`, or the `Device`'s drop, first finishes the abandoned exchange and discards its response. ISO-DEP block numbers stay in sync. RFAL never keeps a pointer into your `tx` buffer. |
+| `transceive` future | The next `transceive` first finishes the abandoned exchange and discards its response, so ISO-DEP block numbers stay in sync. It waits at most 1 s for it, then fails with `RfalError::Busy` without sending; the call after that waits again. `deactivate` and the `Device`'s drop abort the exchange instead (field off). RFAL never keeps a pointer into your `tx` buffer. |
 | `deactivate` future | The device is deactivated as when the `Device` is dropped. |
-| `Device` | It is deactivated (DESELECT / RLS if applicable), the field goes off and RFAL returns to idle. This blocks for about 10 ms in `wait_irq_blocking`, plus the rest of an abandoned exchange, and errors are logged. In async code that must never block, call `device.deactivate().await` instead. |
+| `Device` | It is deactivated (DESELECT / DSL / RLS if applicable), the field goes off and RFAL returns to idle; errors are logged. This blocks in `wait_irq_blocking`: about 10 ms for an ISO-DEP card, 5 ms for an RF-interface tag, and for NFC-DEP up to the device's response waiting time (RWT, at most about 5 s) plus 5 ms. An abandoned exchange is aborted: the field goes off at once and the device gets no DESELECT / DSL / RLS. In async code, call `device.deactivate().await` instead; it waits without blocking the executor, except inside RFAL for NFC-DEP. |
 | `NfcReader` | The field goes off, RFAL is deinitialised and the claim is released. `release()` does the same and returns the platform. |
 
 For time limits, `DiscoveryConfig::timeout` ends discovery with

@@ -142,7 +142,9 @@ fn run(
 ```
 
 0.2, async: the same flow with `.await`. Use `Hal::new_async` to sleep on
-the IRQ line, and `device.deactivate().await` to never block the executor:
+the IRQ line, and `device.deactivate().await` to deactivate without
+blocking the executor (RFAL itself still busy-waits for an NFC-DEP device's
+DSL / RLS answer):
 
 ```rust
 use embedded_hal::{delay::DelayNs, digital::InputPin, spi::SpiDevice};
@@ -339,8 +341,8 @@ static LIKE_0_1: DiscoveryConfig = DiscoveryConfig::new()
 |---|---|
 | `reader.start_apdu_transceive(apdu, cfg)?`, a `get_apdu_transceive_status()` loop, `get_apdu_transceive_result()? -> Vec<u8>` | `device.transceive(apdu).await? -> &[u8]` / `device.blocking_transceive(apdu)?`. The response borrows the device (no copy); `.to_vec()` it or copy it out if you need to keep it. |
 | `RfalApduTransceiveConfig { fwt, dfwt, fsx, did, our_fsx }` (`RfalApduTransceiveConfigBuilder`) | Gone: FWT, FSC and DID come from the activation, and our FSD is `DiscoveryConfig::iso_dep_frame_size`. |
-| Starting a new APDU exchange aborted the running one | Dropping a `transceive` future lets the next call finish that exchange first. |
-| RF frames (T2T, NFC-V, FeliCa, ST25TB) and NFC-DEP through raw `ffi` calls | `device.transceive(frame)`. The RF frame wait time is set with `device.set_rf_frame_wait_time(d)` (default 20 ms), and the exact bit count of a partial last byte comes from `device.last_rx_bits()`. |
+| Starting a new APDU exchange aborted the running one | Dropping a `transceive` future lets the next call finish that exchange first, for at most 1 s; after that it fails with `RfalError::Busy` without sending. Deactivating or dropping the device aborts the exchange (field off). |
+| RF frames (T2T, NFC-V, FeliCa, ST25TB) and NFC-DEP through raw `ffi` calls | `device.transceive(frame)`. The RF frame wait time is set with `device.set_rf_frame_wait_time(d)` (default 20 ms; at or below the technology's minimum response time, such as about 86 µs for NFC-A, `transceive` fails with `RfalError::Param`), and the exact bit count of a partial last byte comes from `device.last_rx_bits()`. |
 
 ### Deactivation
 
