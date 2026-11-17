@@ -193,6 +193,10 @@ fn display_messages() {
         "incomplete last byte (3 valid bits)"
     );
     assert_eq!(
+        format!("{}", RfalError::IncompleteByte(0)),
+        "incomplete last byte"
+    );
+    assert_eq!(
         format!("{}", RfalError::Unknown(99)),
         "unknown RFAL error code 99"
     );

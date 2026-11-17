@@ -16,7 +16,7 @@
 //! deinitialise RFAL or call `rfalNfcDiscover` there, and don't keep
 //! pointers into RFAL's buffers past the closure. Device records and discovery
 //! parameters also show up in [`Device::raw`](crate::Device::raw) and
-//! [`DiscoveryConfig::raw`](crate::DiscoveryConfig::raw).
+//! [`DiscoveryConfig::with_raw`](crate::DiscoveryConfig::with_raw).
 
 pub use self::bindings::*;
 

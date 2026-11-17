@@ -104,6 +104,12 @@ pub trait Platform {
     /// hand with [`Waker::noop`](core::task::Waker::noop), but keeps the CPU
     /// busy. Override it with an interrupt-driven wait for low power
     /// ([`Hal::new_async`](crate::Hal::new_async) does).
+    ///
+    /// The flow futures are `Send` when this future is. With a concrete
+    /// platform type the compiler sees that directly; generic code over
+    /// `P: Platform + Send` cannot require it on stable Rust (that needs
+    /// return-type notation), so use a concrete type where a `Send` future
+    /// is needed (e.g. to spawn the flow on a multi-threaded executor).
     #[allow(async_fn_in_trait)]
     async fn wait_irq(&mut self, timeout_ms: u32) {
         let start = self.now_ms();

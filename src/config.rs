@@ -18,7 +18,7 @@ use crate::ffi;
 ///
 /// Card emulation, NFC-DEP general bytes, wake-up tuning and proprietary
 /// technologies are not covered by the safe fields; set them through
-/// [`raw`](Self::raw).
+/// [`with_raw`](Self::with_raw).
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct DiscoveryConfig {
@@ -26,7 +26,7 @@ pub struct DiscoveryConfig {
     pub poll: PollTech,
     /// Technologies to listen as (card emulation / target). Default: none.
     /// Listening also needs `lmConfigPA`/`lmConfigPF` set through
-    /// [`raw`](Self::raw).
+    /// [`with_raw`](Self::with_raw).
     pub listen: ListenTech,
     /// Stop technology detection early once one of these technologies is
     /// found. Default: none.
@@ -64,11 +64,9 @@ pub struct DiscoveryConfig {
     /// Enter RFAL's low-power wake-up mode (with its default configuration)
     /// before polling. Default: `false`.
     pub wake_up: bool,
-    /// Escape hatch, applied last to the RFAL parameters built from the
-    /// fields above (the crate overwrites only `notifyCb` afterwards): wake-up
-    /// configuration, listen-mode configurations, NFC-DEP general bytes,
-    /// proprietary callbacks. Default: `None`.
-    pub raw: Option<fn(&mut ffi::rfalNfcDiscoverParam)>,
+    /// The [`with_raw`](Self::with_raw) hook. Private: setting it is
+    /// `unsafe`. Default: `None`.
+    raw: Option<fn(&mut ffi::rfalNfcDiscoverParam)>,
 }
 
 impl Default for DiscoveryConfig {
@@ -149,8 +147,27 @@ impl DiscoveryConfig {
         self
     }
 
-    /// Set [`raw`](Self::raw) to `Some(f)`.
-    pub const fn with_raw(mut self, f: fn(&mut ffi::rfalNfcDiscoverParam)) -> Self {
+    /// Set an escape hatch that edits the RFAL parameters directly, for
+    /// what the safe fields do not cover: wake-up configuration, listen-mode
+    /// configurations (`lmConfigPA`/`lmConfigPF`), NFC-DEP `nfcid3` and
+    /// general bytes, proprietary-technology callbacks (`propNfc`).
+    ///
+    /// `discover` calls `f` on the parameters built from the safe fields,
+    /// after mapping them; afterwards the crate overwrites only `notifyCb`.
+    /// A later call replaces the hook.
+    ///
+    /// # Safety
+    ///
+    /// RFAL trusts these parameters. Every function pointer `f` stores (the
+    /// `propNfc` callbacks) must be sound for RFAL to call, with no arguments,
+    /// from inside any [`NfcReader`](crate::NfcReader) call while the
+    /// configuration is in use: RFAL runs them as part of its discovery state
+    /// machine, with the chip and the platform in use by the reader, so they
+    /// must not touch the reader or its platform. The plain data fields have
+    /// no extra requirement; RFAL validates the ones it bounds (for example
+    /// `GBLen`) and fails `discover` with
+    /// [`RfalError::Param`](crate::RfalError::Param).
+    pub const unsafe fn with_raw(mut self, f: fn(&mut ffi::rfalNfcDiscoverParam)) -> Self {
         self.raw = Some(f);
         self
     }
@@ -170,7 +187,7 @@ impl DiscoveryConfig {
     /// - `notifyCb` is left `None`; the caller sets the crate's internal
     ///   no-op callback **after** `to_raw` returns (RFAL stops in
     ///   `POLL_SELECT` only when a callback is set).
-    /// - Calls [`raw`](Self::raw) last, if set.
+    /// - Calls the [`with_raw`](Self::with_raw) hook last, if set.
     /// - Pure: no RFAL calls, never panics.
     ///
     /// Takes `self` by value (`DiscoveryConfig` is `Copy`; clippy's
@@ -232,6 +249,7 @@ fn saturating_ms_u16(d: Duration) -> u16 {
 /// What to do when RFAL resolved several devices (only with
 /// [`DiscoveryConfig::device_limit`] > 1).
 #[derive(Clone, Copy, Default)]
+#[non_exhaustive]
 pub enum Select {
     /// Activate the first device RFAL found.
     #[default]
@@ -423,7 +441,7 @@ impl PollTech {
     /// ST25TB (ST proprietary, ISO 14443-B based).
     pub const ST25TB: Self = Self(ffi::RFAL_NFC_POLL_TECH_ST25TB as u16);
     /// Proprietary technology (callbacks set through
-    /// [`DiscoveryConfig::raw`]).
+    /// [`DiscoveryConfig::with_raw`]).
     pub const PROP: Self = Self(ffi::RFAL_NFC_POLL_TECH_PROP as u16);
 }
 
@@ -904,7 +922,8 @@ mod tests {
         assert!(p.notifyCb.is_none());
 
         // `raw` runs last, on the mapped values.
-        let p = c.with_raw(bump_dev_limit).to_raw();
+        // SAFETY: `bump_dev_limit` sets no function pointers.
+        let p = unsafe { c.with_raw(bump_dev_limit) }.to_raw();
         assert_eq!(p.devLimit, 14);
         assert_eq!(p.GBLen, 7);
         assert_eq!(p.totalDuration, 1234);
@@ -980,16 +999,19 @@ mod tests {
         p.GBLen = 0;
     }
 
-    static CONFIG: DiscoveryConfig = DiscoveryConfig::new()
-        .with_poll(PollTech::A.union(PollTech::V))
-        .with_listen(ListenTech::F)
-        .with_round(Duration::from_millis(250))
-        .with_timeout(Duration::from_secs(3))
-        .with_device_limit(3)
-        .with_select(Select::With(pick_last))
-        .with_compliance(ComplianceMode::Iso)
-        .with_wake_up(true)
-        .with_raw(no_gb);
+    // SAFETY: `no_gb` sets no function pointers.
+    static CONFIG: DiscoveryConfig = unsafe {
+        DiscoveryConfig::new()
+            .with_poll(PollTech::A.union(PollTech::V))
+            .with_listen(ListenTech::F)
+            .with_round(Duration::from_millis(250))
+            .with_timeout(Duration::from_secs(3))
+            .with_device_limit(3)
+            .with_select(Select::With(pick_last))
+            .with_compliance(ComplianceMode::Iso)
+            .with_wake_up(true)
+            .with_raw(no_gb)
+    };
 
     const DEFAULT: DiscoveryConfig = DiscoveryConfig::new();
 

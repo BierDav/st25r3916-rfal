@@ -56,6 +56,13 @@ jobs:
             args: --features defmt
           - name: log+defmt
             args: --features log,defmt
+          # The RFAL behaviour patches, each on its own.
+          - name: apple-ecp
+            args: --features apple-ecp
+          - name: force-wupa
+            args: --features force-wupa
+          - name: poll-keep-field-on
+            args: --features poll-keep-field-on
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

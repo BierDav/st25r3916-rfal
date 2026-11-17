@@ -292,8 +292,10 @@ static CONFIG: DiscoveryConfig = DiscoveryConfig::new()
 
 The other RFAL parameters are public fields, e.g. `bail`, `max_bit_rate` and
 `iso_dep_frame_size`. Listen-mode (card emulation) configuration, NFC-DEP
-general bytes and wake-up tuning go through the `with_raw` hook, which edits
-the raw `ffi::rfalNfcDiscoverParam`.
+general bytes, wake-up tuning and proprietary technologies go through the
+`unsafe` `with_raw` hook, which edits the raw `ffi::rfalNfcDiscoverParam`
+(it is `unsafe` because RFAL calls the `propNfc` function pointers it may
+set).
 
 ## Devices and data exchange
 
@@ -366,9 +368,12 @@ the reader's platform active. Everything in `ffi` is outside semver.
 - **`Send`.** `NfcReader<P>` and `Device` are `Send` when `P` is. The futures
   of `discover`, `transceive` and `deactivate` are `Send` when `P` and its
   `wait_irq` future are, which holds for `Hal` with `Send` parts and for
-  `EspPlatform`. Generic code over `P: Platform` cannot require that yet. To
-  use the reader from several tasks, give it to one task and send that task
-  requests (or put it behind a mutex).
+  `EspPlatform`. Generic code over `P: Platform + Send` cannot name the
+  `wait_irq` future to require `Send` on stable Rust (that needs
+  return-type notation), so it gets a non-`Send` flow future; spawn the flow
+  with a concrete platform type instead. To use the reader from several
+  tasks, give it to one task and send that task requests (or put it behind a
+  mutex).
 
 ## Cancellation and drop
 
@@ -500,9 +505,12 @@ espup install --toolchain-version 1.100.0.0 --targets esp32 --std
 MCU=esp32 cargo +esp build --target xtensa-esp32-espidf
 ```
 
-The C code is compiled with esp-idf-sys's per-chip GCC
-(`riscv32-esp-elf-gcc`, `xtensa-esp32-elf-gcc`, ...) unless `CC_<target>`
-is set.
+With the `esp-idf` feature, the C code is compiled with esp-idf-sys's
+per-chip GCC (`riscv32-esp-elf-gcc`, `xtensa-esp32-elf-gcc`, ...) unless
+`CC_<target>` is set. The build script finds that GCC through esp-idf-sys,
+so without the feature (for example a bare-metal `xtensa-esp32-none-elf`
+build with your own `Platform`), put the ESP GCC on `PATH` or set
+`CC_<target>`.
 
 ## Minimum supported Rust version
 

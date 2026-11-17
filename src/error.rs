@@ -144,8 +144,14 @@ pub enum RfalError {
     /// `RFAL_ERR_INVALID_HANDLE` (38): invalid or uninitialised device handle.
     InvalidHandle,
     /// `RFAL_ERR_INCOMPLETE_BYTE` (40) and `RFAL_ERR_INCOMPLETE_BYTE_01`..`_07`
-    /// (41..=47): the last received byte was incomplete; the value is the
-    /// number of valid bits in it (`0..=7`, the code minus 40).
+    /// (41..=47): the last received byte was incomplete. The value is the
+    /// code minus 40: `1..=7` valid bits for the numbered codes, or `0` for
+    /// the plain code, which RFAL uses with the bit count in the received
+    /// length instead (it is not "zero valid bits").
+    ///
+    /// [`Device::transceive`](crate::Device::transceive) never returns this
+    /// for RF frames; it reports the bit count through
+    /// [`Device::last_rx_bits`](crate::Device::last_rx_bits).
     IncompleteByte(u8),
     /// A code this version does not know (e.g. from a newer RFAL).
     Unknown(u16),
@@ -297,9 +303,10 @@ impl fmt::Display for RfalError {
             RfalError::HwMismatch => return f.write_str(HW_MISMATCH_HINT),
             RfalError::LinkLoss => "link loss (remote field not as expected)",
             RfalError::InvalidHandle => "invalid device handle",
-            RfalError::IncompleteByte(bits) => {
-                return write!(f, "incomplete last byte ({} valid bits)", bits & 7);
-            }
+            RfalError::IncompleteByte(bits) => match bits & 7 {
+                0 => "incomplete last byte",
+                n => return write!(f, "incomplete last byte ({n} valid bits)"),
+            },
             RfalError::Unknown(code) => return write!(f, "unknown RFAL error code {code}"),
         };
         f.write_str(msg)

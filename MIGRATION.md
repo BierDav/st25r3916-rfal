@@ -286,7 +286,7 @@ no longer exists; the replacement column says what to do instead.
 | `.max_br(..)`, `.nfcf_br(..)`, `.ap2p_br(..)` (`RfalBitRate`) | `config.max_bit_rate`, `nfcf_bit_rate` and `ap2p_bit_rate` (`BitRate`). |
 | `.iso_dep_fs(RfalIsoDepFSxI::X)` | `config.iso_dep_frame_size = FrameSize::X`. |
 | `.wakeup_enabled(b)` | `.with_wake_up(b)`, which uses RFAL's default wake-up configuration. |
-| `.nfcid3`, `.gb`, `.gb_len`, `.p2p_nfca_prio`, `.prop_nfc`, `.nfc_dep_lr`, `.lm_config_pa`, `.lm_config_pf`, `.wakeup_config_default`, `.wakeup_config`, `.wakeup_poll_before`, `.wakeup_n_polls` | `.with_raw(f)` with `f: fn(&mut ffi::rfalNfcDiscoverParam)`. It sets the raw fields (`nfcid3`, `GB`, `GBLen`, `lmConfigPA`, `wakeupConfig`, ...) after the safe ones. |
+| `.nfcid3`, `.gb`, `.gb_len`, `.p2p_nfca_prio`, `.prop_nfc`, `.nfc_dep_lr`, `.lm_config_pa`, `.lm_config_pf`, `.wakeup_config_default`, `.wakeup_config`, `.wakeup_poll_before`, `.wakeup_n_polls` | `unsafe { config.with_raw(f) }` with `f: fn(&mut ffi::rfalNfcDiscoverParam)`. It sets the raw fields (`nfcid3`, `GB`, `GBLen`, `lmConfigPA`, `wakeupConfig`, `propNfc`, ...) after the safe ones; see its `# Safety` section. |
 | (none) | New: `.with_timeout(d)` ends discovery with `Error::NoDevice`. |
 | `reader.start_discovery(config)?` | `reader.discover(&config).await?` / `reader.blocking_discover(&config)?`. |
 | `dev_limit > 1`, `RfalNfcState::PollSelect` in the callback, `reader.devices_found()`, `reader.select_device(i)` | `.with_device_limit(n).with_select(Select::With(pick))`, with `pick: fn(&[DeviceInfo]) -> Option<usize>`. |
