@@ -674,6 +674,91 @@ fn iso_dep_t4t_apdu_round_trip() {
 // Deactivation
 // ---------------------------------------------------------------------------
 
+/// How a test ends a device.
+#[derive(Clone, Copy, Debug)]
+enum End {
+    Drop,
+    Blocking,
+    Async,
+}
+
+impl End {
+    const ALL: [End; 3] = [End::Drop, End::Blocking, End::Async];
+
+    /// End `dev` this way; the async flavour is polled by hand.
+    fn run(self, dev: Device<'_, SimPlatform>) {
+        match self {
+            End::Drop => drop(dev),
+            End::Blocking => dev.blocking_deactivate().expect("blocking_deactivate"),
+            End::Async => poll_by_hand(dev.deactivate()).0.expect("async deactivate"),
+        }
+    }
+}
+
+/// The two tags of the deactivation tests: ISO-DEP (DESELECT first) and RF
+/// interface (field off at once), with a frame each understands.
+fn tags() -> [(NfcATag, Vec<u8>); 2] {
+    [
+        (echo_t4t(&UID4), SELECT_NDEF.to_vec()),
+        (NfcATag::t2t(&UID7), std::vec![0x30, 4]),
+    ]
+}
+
+/// A device stays active longer than a discovery round (1000 ms by
+/// default), then is deactivated on a fast board with a coarse clock (1 ms
+/// per 20 reads) and waits that return early, both allowed by the
+/// `Platform` contract. RFAL's round timer has expired by then, so the step
+/// that ends the deactivation and turns the field off replaces it with a
+/// fresh tFIELD_OFF timer (`rfal_nfc.c:2321-2326`) that this step did not
+/// poll; for ISO-DEP, the earliest deadline the step did poll is the
+/// DESELECT's sanity timer, about 1 s away. Fast-forwarding RFAL's clock
+/// must not skip the tFIELD_OFF timer: the field stays off for at least
+/// 5 ms, and the flow still returns promptly.
+#[test]
+fn field_stays_off_for_t_field_off_after_a_device_outlived_the_round() {
+    let _guard = rfal_test_lock();
+    for end in End::ALL {
+        for (tag, _) in tags() {
+            let iso_dep = matches!(tag.kind, super::sim_chip::TagKind::T4t { .. });
+            let board = board(Some(tag));
+            let mut r = reader(&board);
+            let dev = discover(&mut r, &board, &config());
+            let stopped_at = {
+                let mut chip = board.lock();
+                chip.delay_ms(1500);
+                chip.early_waits = true;
+                chip.clock_reads_per_tick = 20;
+                chip.now_ms
+            };
+
+            end.run(dev);
+            {
+                let chip = board.lock();
+                assert!(!chip.field_on(), "{end:?}: the field is off");
+                assert_eq!(
+                    chip.rf_frames_starting_with(S_DESELECT) > 0,
+                    iso_dep,
+                    "{end:?}: S(DESELECT) for ISO-DEP only"
+                );
+                let off_at = chip.last_field_off_ms.expect("the field went off");
+                assert_field_off_promptly(stopped_at, off_at, chip.now_ms);
+            }
+            assert_eq!(rfal_state(&mut r), ffi::rfalNfcState_RFAL_NFC_STATE_IDLE);
+
+            {
+                let mut chip = board.lock();
+                chip.early_waits = false;
+                chip.clock_reads_per_tick = 1;
+            }
+            let dev = discover(&mut r, &board, &config());
+            assert!(!dev.info().uid().is_empty(), "discover works again");
+            drop(dev);
+            drop(r);
+            finish(&board);
+        }
+    }
+}
+
 #[test]
 fn dropping_the_device_turns_the_field_off() {
     let _guard = rfal_test_lock();

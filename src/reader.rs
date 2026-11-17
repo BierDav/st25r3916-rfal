@@ -225,20 +225,27 @@ impl<P: Platform> NfcReader<P> {
     /// with waits in between: DESELECT / RLS of an active device, field off,
     /// then RFAL keeps the field off **until its discovery-round timer
     /// expires** (`rfal_nfc.c:2307-2338`), up to a whole
-    /// [`round`](crate::DiscoveryConfig::round). Once RFAL is only doing that
-    /// (see [`deactivation_step`]), RFAL's clock is advanced so that just
-    /// `RFAL_NFC_T_FIELD_OFF` (5 ms) of the wait remains: the field stays off
-    /// for the minimum the NFC Forum requires before the next poll, and the
-    /// flow returns promptly. The final `rfalNfcDeactivate(IDLE)` then runs
-    /// with no device active and the field off, so it returns at once
-    /// (called directly from an active state it would busy-wait inside RFAL,
-    /// `rfalRunBlocking`, `rfal_nfc.c:283`).
+    /// [`round`](crate::DiscoveryConfig::round). That timer is at least
+    /// `RFAL_NFC_T_FIELD_OFF` (5 ms) away when the field goes off: RFAL
+    /// replaces it with a fresh 5 ms timer if it would expire sooner
+    /// (`rfal_nfc.c:2321-2326`). Once a step has **started** in that
+    /// field-off phase (see [`deactivation_step`]), RFAL's clock is advanced
+    /// so that just 5 ms of the wait remains ([`skip_rest_of_round`]): the
+    /// field stays off for the minimum the NFC Forum requires before the next
+    /// poll, and the flow returns promptly. The final `rfalNfcDeactivate(IDLE)`
+    /// then runs with no device active and the field off, so it returns at
+    /// once (called directly from an active state it would busy-wait inside
+    /// RFAL, `rfalRunBlocking`, `rfal_nfc.c:283`).
     ///
-    /// With [`AsyncWait`] this never blocks the executor; with
-    /// [`BlockingWait`] the waits go through `wait_irq_blocking`, which may
-    /// sleep. Platform errors don't stop it (RFAL's waits are timer-bounded);
-    /// the first one is returned. The caller must have finished any data
-    /// exchange first (`Device` drains).
+    /// With [`AsyncWait`] the waits never block the executor; with
+    /// [`BlockingWait`] they go through `wait_irq_blocking`, which may sleep.
+    /// RFAL itself blocks for an NFC-DEP device: DSL / RLS run to completion
+    /// inside one step (`rfal_nfcDep.c:547`, `2390`), up to the device's
+    /// response waiting time (RWT, at most about 5 s). Platform errors don't
+    /// stop it (RFAL's waits are timer-bounded); the first one is returned.
+    /// A running data exchange must be finished first (`Device` drains).
+    ///
+    /// [`skip_rest_of_round`]: Self::skip_rest_of_round
     pub(crate) async fn idle_impl<M: WaitMode>(&mut self) -> Result<(), Error> {
         let mut first_error = None;
         // SAFETY (every `unsafe` block below): RFAL calls inside the session of
@@ -253,8 +260,10 @@ impl<P: Platform> NfcReader<P> {
         let (code, entered) = self.enter_both(|| unsafe { ffi::rfalNfcDeactivate(discovery) });
         keep_first(&mut first_error, entered);
         if code == ffi::RFAL_ERR_NONE {
+            // The previous step ended in the field-off phase.
+            let mut was_field_off = false;
             loop {
-                let ((state, only_field_off), entered) =
+                let ((state, field_off), entered) =
                     self.enter_both(|| unsafe { deactivation_step() });
                 keep_first(&mut first_error, entered);
                 // Anything but DEACTIVATION: done (`START_DISCOVERY`; the next
@@ -262,10 +271,21 @@ impl<P: Platform> NfcReader<P> {
                 if state != state::DEACTIVATION {
                     break;
                 }
-                if only_field_off {
+                let cap = if was_field_off {
+                    // This step started in the field-off phase, so RFAL
+                    // polled its round timer as it stands (only the step that
+                    // turns the field off replaces it, after its poll).
                     self.skip_rest_of_round();
-                }
-                self.idle_wait::<M>(None).await;
+                    None
+                } else if field_off {
+                    // Just turned off: step again at once, to read the round
+                    // timer's deadline (see above).
+                    Some(0)
+                } else {
+                    None
+                };
+                was_field_off = field_off;
+                self.idle_wait::<M>(cap).await;
             }
         } else {
             // e.g. `Param`: nothing to discover (`techs2Find` empty), so RFAL
@@ -291,12 +311,19 @@ impl<P: Platform> NfcReader<P> {
     /// expires: advance RFAL's clock so that [`T_FIELD_OFF_MS`] of that wait
     /// remains.
     ///
-    /// The step just before polled the round timer, so the earliest deadline
-    /// it recorded ([`shim::next_deadline`]) is at or before it; skipping to
-    /// `T_FIELD_OFF_MS` before that deadline never overshoots the round timer,
-    /// and the next step (which polls only the round timer) finishes the job.
-    /// The other RFAL timers left at this point (guard time, transceive and
-    /// collision-resolution timers) are restarted before they are used again.
+    /// Only right after a step that **started** in the field-off phase
+    /// (`idle_impl`). Such a step polls the round timer as it stands: RFAL
+    /// replaces the timer (with a fresh 5 ms one) only in the step that turns
+    /// the field off, after polling the old one (`rfal_nfc.c:2321-2326`), and
+    /// that step's deadlines are therefore never used here. So the earliest
+    /// deadline the step recorded ([`shim::next_deadline`]) is at or before
+    /// the round timer, and skipping to `T_FIELD_OFF_MS` before it never
+    /// overshoots the round timer, nor its last 5 ms. A field-off step polls
+    /// no other timer of the deactivation. The other RFAL timers still
+    /// running (guard time, collision resolution, and the transceive timers
+    /// of an exchange a field-off ended) belong to work that is over: an
+    /// early expiry at most ends that work sooner, and RFAL restarts each
+    /// timer before new work uses it.
     fn skip_rest_of_round(&mut self) {
         let Some(deadline) = shim::next_deadline() else {
             return;
@@ -373,15 +400,20 @@ fn keep_first(first: &mut Option<Error>, result: Result<(), Error>) {
 }
 
 /// One step of RFAL's deactivation: the state after it, and whether RFAL is
-/// now only keeping the field off until its round timer expires.
+/// now in its field-off phase, only keeping the field off until its round
+/// timer expires (`rfal_nfc.c:2332-2337`).
 ///
 /// That is the case once a step ends in `DEACTIVATION` and either
 /// - no device record is active (`rfalNfcGetActiveDevice` fails): only
 ///   discovery was running, so `rfalNfcDeactivation` turned the field off in
 ///   this step and has nothing else to do (`rfal_nfc.c:2229`, `2307-2338`), or
-/// - no RF transceive is pending: the DESELECT / RLS of the active device is
-///   over (a DESELECT keeps a transceive pending at every step boundary until
-///   it ends, and the field goes off in the same call that sees it end).
+/// - no RF transceive is pending: the DESELECT / DSL / RLS of the active
+///   device is over (a DESELECT keeps a transceive pending at every step
+///   boundary until it ends, DSL / RLS end inside the step, and the field
+///   goes off in the same call that sees them end).
+///
+/// The converse need not hold: a missed field-off phase only means the
+/// round is not skipped.
 ///
 /// # Safety
 /// Inside the session of the claim holder, in a deactivation.

@@ -630,6 +630,16 @@ pub(crate) struct Chip {
     pub now_ms: u32,
     /// How far each clock read advances the clock (so busy-waits end).
     pub ms_per_clock_read: u32,
+    /// The clock advances (by `ms_per_clock_read`) only on every this many
+    /// reads (`1`: every read): a fast board with a coarse millisecond tick,
+    /// where several RFAL steps fit into one millisecond.
+    pub clock_reads_per_tick: u32,
+    /// Clock reads so far (for `clock_reads_per_tick`).
+    pub clock_reads: u32,
+    /// Both `Platform` waits return at once (after counting), as the
+    /// `Platform` contract allows: time then only passes through the clock
+    /// reads inside the flows. (SimPlatform only.)
+    pub early_waits: bool,
     /// The next this many SPI frames fail (not delivered to the chip);
     /// `usize::MAX` is a broken bus.
     pub fail_next_spi_frames: usize,
@@ -666,6 +676,9 @@ impl Default for Chip {
             last_field_off_ms: None,
             now_ms: 0,
             ms_per_clock_read: 1,
+            clock_reads_per_tick: 1,
+            clock_reads: 0,
+            early_waits: false,
             fail_next_spi_frames: 0,
             spi_faults: 0,
             waits_blocking: 0,
@@ -701,10 +714,15 @@ impl Chip {
         self.regs_a[reg::OP_CONTROL] & reg::OP_CONTROL_TX_EN != 0
     }
 
-    /// Read the clock, advancing it by `ms_per_clock_read`.
+    /// Read the clock, advancing it by `ms_per_clock_read` (on every
+    /// `clock_reads_per_tick`-th read).
     pub fn clock_read(&mut self) -> u32 {
         let now = self.now_ms;
-        self.now_ms = self.now_ms.wrapping_add(self.ms_per_clock_read);
+        self.clock_reads = self.clock_reads.wrapping_add(1);
+        if self.clock_reads >= self.clock_reads_per_tick {
+            self.clock_reads = 0;
+            self.now_ms = self.now_ms.wrapping_add(self.ms_per_clock_read);
+        }
         now
     }
 
@@ -1062,8 +1080,17 @@ impl SharedChip {
 ///   (advances the clock). `delay_ms`: advances the clock.
 /// - Both waits behave like the trait defaults (spin / self-waking poll on
 ///   the IRQ line and the clock), but count their calls and enforce
-///   [`Chip::max_waits`].
+///   [`Chip::max_waits`]. With [`Chip::early_waits`] they return at once.
 pub(crate) struct SimPlatform(pub SharedChip);
+
+impl SimPlatform {
+    /// Count a wait; `true` if it is to return at once.
+    fn start_wait(&mut self, blocking: bool) -> bool {
+        let mut chip = self.0.lock();
+        chip.note_wait(blocking);
+        chip.early_waits
+    }
+}
 
 impl Platform for SimPlatform {
     fn spi_write(&mut self, frame: &[u8]) -> Result<(), PlatformError> {
@@ -1097,13 +1124,17 @@ impl Platform for SimPlatform {
     }
 
     fn wait_irq_blocking(&mut self, timeout_ms: u32) {
-        self.0.lock().note_wait(true);
+        if self.start_wait(true) {
+            return;
+        }
         let start = self.now_ms();
         while !self.irq_is_high() && self.now_ms().wrapping_sub(start) < timeout_ms {}
     }
 
     async fn wait_irq(&mut self, timeout_ms: u32) {
-        self.0.lock().note_wait(false);
+        if self.start_wait(false) {
+            return;
+        }
         let start = self.now_ms();
         poll_fn(|cx| {
             if self.irq_is_high() || self.now_ms().wrapping_sub(start) >= timeout_ms {
@@ -1659,6 +1690,12 @@ mod platforms {
         assert_eq!(p.now_ms(), t0 + 1, "each clock read advances 1 ms");
         p.delay_ms(5);
         assert_eq!(p.now_ms(), t0 + 7);
+        // A coarse tick: 1 ms every third read.
+        board.lock().clock_reads_per_tick = 3;
+        let t1 = p.now_ms();
+        let reads: Vec<u32> = (0..6).map(|_| p.now_ms() - t1).collect();
+        assert_eq!(reads, [0, 0, 1, 1, 1, 2]);
+        board.lock().clock_reads_per_tick = 1;
 
         board.lock().fail_next_spi_frames = 2;
         let mut f = [READ_IC_IDENTITY, 0xEE];
@@ -1701,9 +1738,20 @@ mod platforms {
         assert!(pin!(p.wait_irq(1_000)).poll(&mut cx).is_ready());
         p.wait_irq_blocking(1_000);
 
-        let chip = board.lock();
+        let mut chip = board.lock();
         assert_eq!((chip.waits_blocking, chip.waits_async), (2, 2));
         assert!(chip.async_wait_pendings > 0);
+
+        // Early waits return at once, without reading the clock.
+        chip.early_waits = true;
+        let (t0, pendings) = (chip.now_ms, chip.async_wait_pendings);
+        drop(chip);
+        p.wait_irq_blocking(1_000);
+        assert!(pin!(p.wait_irq(1_000)).poll(&mut cx).is_ready());
+        let chip = board.lock();
+        assert_eq!(chip.now_ms, t0);
+        assert_eq!((chip.waits_blocking, chip.waits_async), (3, 3));
+        assert_eq!(chip.async_wait_pendings, pendings);
     }
 
     #[test]

@@ -386,7 +386,10 @@ pub(crate) fn next_deadline() -> Option<u32> {
 /// while RFAL has no timer pending whose early expiry matters. The one user
 /// is `NfcReader::idle_impl`: once RFAL's deactivation only keeps the field
 /// off until the end of the discovery round, it skips all but
-/// `RFAL_NFC_T_FIELD_OFF` of that wait. Callers keep `ms` below 2³¹.
+/// `RFAL_NFC_T_FIELD_OFF` of that wait, going by the [`next_deadline`] of a
+/// step that polled the round timer as it stands (not of the step that
+/// turned the field off, which may replace that timer unpolled). Callers
+/// keep `ms` below 2³¹.
 pub(crate) fn skip_rfal_time(ms: u32) {
     with_state(|s| s.skew = s.skew.wrapping_add(ms));
 }
