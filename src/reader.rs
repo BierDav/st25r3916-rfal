@@ -28,8 +28,11 @@ pub const CHIP: Chip = if cfg!(feature = "st25r3916b") {
 };
 
 /// An ST25R3916 chip variant.
+///
+/// Non-exhaustive: later RFAL versions may support more variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Chip {
     /// ST25R3916 (and ST25R3917); feature `st25r3916`.
     St25r3916,
