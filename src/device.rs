@@ -136,15 +136,22 @@ struct RxBuf {
 /// or [deactivated](Self::deactivate).
 ///
 /// While a `Device` exists, the reader cannot discover, and nothing else can
-/// run RFAL. Dropping it deactivates the device (DESELECT/RLS if applicable),
-/// turns the field off and returns RFAL to idle, blocking for about 10 ms:
-/// the DESELECT wait (`ISODEP_FWT_DEACTIVATION` ≈ 5.3 ms) plus the minimum
-/// field-off time (tFIELD_OFF, 5 ms). The waits go through
-/// [`Platform::wait_irq_blocking`], which may sleep. An exchange abandoned by
-/// a dropped `transceive` future is aborted, not finished: the field goes off
-/// at once, so the device loses power and gets no DESELECT / RLS, and the
-/// 5 ms of field off follow. Errors are logged. Async code that must never
-/// block calls [`deactivate`](Self::deactivate) instead.
+/// run RFAL. Dropping it deactivates the device, turns the field off and
+/// returns RFAL to idle, blocking:
+/// - ISO-DEP: S(DESELECT), and up to `ISODEP_FWT_DEACTIVATION` (≈ 5.3 ms) of
+///   waiting for its answer;
+/// - NFC-DEP: DSL_REQ or RLS_REQ, which RFAL sends and waits for inside one
+///   call (busy-waiting), up to the response waiting time the device gave at
+///   activation (RWT, at most about 5 s);
+/// - then the field stays off for the minimum tFIELD_OFF of 5 ms.
+///
+/// An ISO-DEP card thus takes about 10 ms, an RF-interface tag 5 ms. The
+/// waits go through [`Platform::wait_irq_blocking`], which may sleep. An
+/// exchange abandoned by a dropped `transceive` future is aborted, not
+/// finished: the field goes off at once, so the device loses power and gets
+/// no DESELECT / DSL / RLS, and the 5 ms of field off follow. Errors are
+/// logged. Async code calls [`deactivate`](Self::deactivate) instead, which
+/// waits without blocking the executor (except inside RFAL for NFC-DEP).
 pub struct Device<'r, P: Platform> {
     reader: &'r mut NfcReader<P>,
     info: DeviceInfo,
@@ -209,9 +216,16 @@ impl<'r, P: Platform> Device<'r, P> {
     ///
     /// # Errors
     ///
-    /// [`Error::Rfal`] (e.g. `Param` if `tx` is too long, `Timeout` if the
-    /// device does not answer, [`RfalError::Busy`] if an abandoned exchange is
-    /// still running, see below), [`Error::Platform`].
+    /// - [`Error::Rfal`], e.g.:
+    ///   - `Timeout`: the device did not answer.
+    ///   - `tx` too long: [`RfalError::Param`] on the RF interface (more
+    ///     than 258 bytes), [`RfalError::NoMemory`] for ISO-DEP (more than
+    ///     1024 bytes) and NFC-DEP (more than 256 bytes), RFAL's buffers.
+    ///   - [`RfalError::Param`]: the RF frame wait time is too short (see
+    ///     [`set_rf_frame_wait_time`](Self::set_rf_frame_wait_time)).
+    ///   - [`RfalError::Busy`]: an abandoned exchange is still running (see
+    ///     below). `tx` was not sent.
+    /// - [`Error::Platform`].
     ///
     /// # Cancel safety
     ///
@@ -260,14 +274,18 @@ impl<'r, P: Platform> Device<'r, P> {
         self.rf_fwt = fwt_cycles(fwt);
     }
 
-    /// Deactivate the device: DESELECT/RLS if applicable, field off, RFAL
-    /// idle. An exchange abandoned by a dropped `transceive` future is
-    /// aborted first by turning the field off, which also skips DESELECT /
-    /// RLS (see the type docs).
+    /// Deactivate the device: DESELECT / DSL / RLS if applicable, field
+    /// off, RFAL idle. An exchange abandoned by a dropped `transceive`
+    /// future is aborted first by turning the field off, which also skips
+    /// DESELECT / DSL / RLS (see the type docs).
     ///
-    /// Never blocks the executor: it lets RFAL's worker perform the
-    /// deactivation step by step (DESELECT, field off for tFIELD_OFF), then
-    /// idles. Dropping the future deactivates as `Drop` does (blocking).
+    /// The waits between RFAL's steps (DESELECT, then tFIELD_OFF) go
+    /// through [`Platform::wait_irq`] and do not block the executor. RFAL
+    /// itself blocks for an NFC-DEP device, though: it sends DSL_REQ or
+    /// RLS_REQ and busy-waits for the answer inside one call
+    /// (`rfal_nfcDep.c:547`, `2390`), up to the response waiting time the
+    /// device gave at activation (RWT, at most about 5 s). Dropping the
+    /// future deactivates as `Drop` does (blocking).
     pub async fn deactivate(mut self) -> Result<(), Error> {
         self.deactivate_impl::<AsyncWait>().await
     }

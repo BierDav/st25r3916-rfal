@@ -153,6 +153,17 @@ impl<P: Platform> NfcReader<P> {
     /// deinitialise RFAL, call `rfalNfcDiscover`, or keep pointers into RFAL
     /// past its return.
     ///
+    /// Nor may RFAL keep pointers into the closure's memory past its return.
+    /// In particular, an RF exchange started with `rfalStartTransceive` or
+    /// `rfalNfcDataExchangeStart` (RF interface) keeps the caller's TX
+    /// buffer: RFAL stores the pointer (`rfal_rfst25r3916.c:1362`) and reads
+    /// the frame from it in later worker calls (FIFO loads and refills,
+    /// `2026`, `2059`, `2169`). An exchange on data local to the closure must
+    /// therefore complete inside it (e.g. with RFAL's blocking
+    /// `rfalTransceiveBlockingTxRx`, or by stepping the worker until the
+    /// status is no longer `RFAL_ERR_BUSY`); otherwise the buffer must
+    /// outlive every later RFAL call, e.g. be a `static`.
+    ///
     /// # Errors
     ///
     /// [`Error::Platform`] if the platform failed during the closure (the
