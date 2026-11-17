@@ -205,7 +205,9 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          libs=(target/"${TARGET}"/*/build/st25r3916-rfal-*/out/librfal.a)
+          # Cargo 1.100 moved build script output from build/<pkg>-<hash>/
+          # to build/<pkg>/<hash>/; match both.
+          libs=(target/"${TARGET}"/*/build/st25r3916-rfal{-*,/*}/out/librfal.a)
           [ "${#libs[@]}" -gt 0 ] || { echo "::error::no librfal.a under target/${TARGET}"; exit 1; }
           status=0
           for lib in "${libs[@]}"; do
