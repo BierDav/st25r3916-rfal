@@ -323,8 +323,10 @@ impl<'r, P: Platform> Device<'r, P> {
             }
             (tx.len() * 8) as u16 // ≤ 258 × 8
         } else {
-            // RFAL itself rejects APDUs / PDUs beyond its buffers (NoMemory).
-            u16::try_from(tx.len()).map_err(|_| RfalError::Param)?
+            // RFAL itself rejects APDUs / PDUs beyond its buffers with
+            // NoMemory (`rfal_nfc.c:700-703`, `736-739`); so do we, for
+            // lengths beyond its 16-bit parameter.
+            u16::try_from(tx.len()).map_err(|_| RfalError::NoMemory)?
         };
         let fwt = self.rf_fwt;
         let mut rx_data = ptr::null_mut();

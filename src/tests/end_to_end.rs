@@ -670,6 +670,34 @@ fn iso_dep_t4t_apdu_round_trip() {
     finish(&board);
 }
 
+/// RFAL copies an APDU into its 1024-byte buffer and refuses longer ones
+/// with `NoMemory` (`rfal_nfc.c:700-703`); so does the wrapper for lengths
+/// beyond RFAL's 16-bit length parameter.
+#[test]
+fn iso_dep_apdu_longer_than_1024_bytes_is_no_memory() {
+    let _guard = rfal_test_lock();
+    let board = board(Some(echo_t4t(&UID4)));
+    let mut r = reader(&board);
+    let mut dev = discover(&mut r, &board, &config());
+    let sent = board.lock().rf_log.len();
+    for len in [1025, 70_000] {
+        assert_eq!(
+            dev.blocking_transceive(&std::vec![0; len]).err(),
+            Some(Error::Rfal(RfalError::NoMemory)),
+            "{len}-byte APDU"
+        );
+    }
+    assert_eq!(board.lock().rf_log.len(), sent, "nothing was sent");
+    let resp = dev
+        .blocking_transceive(&SELECT_NDEF)
+        .expect("an APDU that fits")
+        .to_vec();
+    assert_eq!(resp, [0x90, 0x00]);
+    drop(dev);
+    drop(r);
+    finish(&board);
+}
+
 // ---------------------------------------------------------------------------
 // Deactivation
 // ---------------------------------------------------------------------------
