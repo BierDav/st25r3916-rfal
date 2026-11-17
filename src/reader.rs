@@ -237,16 +237,25 @@ impl<P: Platform> NfcReader<P> {
     /// once (called directly from an active state it would busy-wait inside
     /// RFAL, `rfalRunBlocking`, `rfal_nfc.c:283`).
     ///
+    /// `field_already_off`: the caller turned the field off itself (an
+    /// aborted exchange, `Device`). RFAL's DESELECT / DSL / RLS then cannot
+    /// start (`rfalStartTransceive` refuses with the field off,
+    /// `rfal_rfst25r3916.c:1356-1359`), so RFAL's first step already turns to
+    /// the field-off phase.
+    ///
     /// With [`AsyncWait`] the waits never block the executor; with
     /// [`BlockingWait`] they go through `wait_irq_blocking`, which may sleep.
     /// RFAL itself blocks for an NFC-DEP device: DSL / RLS run to completion
     /// inside one step (`rfal_nfcDep.c:547`, `2390`), up to the device's
     /// response waiting time (RWT, at most about 5 s). Platform errors don't
     /// stop it (RFAL's waits are timer-bounded); the first one is returned.
-    /// A running data exchange must be finished first (`Device` drains).
+    /// A running data exchange must be finished or aborted first (`Device`).
     ///
     /// [`skip_rest_of_round`]: Self::skip_rest_of_round
-    pub(crate) async fn idle_impl<M: WaitMode>(&mut self) -> Result<(), Error> {
+    pub(crate) async fn idle_impl<M: WaitMode>(
+        &mut self,
+        field_already_off: bool,
+    ) -> Result<(), Error> {
         let mut first_error = None;
         // SAFETY (every `unsafe` block below): RFAL calls inside the session of
         // the claim holder (`enter_both`); `rfalNfcDeactivate` is only called
@@ -271,6 +280,7 @@ impl<P: Platform> NfcReader<P> {
                 if state != state::DEACTIVATION {
                     break;
                 }
+                let field_off = field_off || field_already_off;
                 let cap = if was_field_off {
                     // This step started in the field-off phase, so RFAL
                     // polled its round timer as it stands (only the step that
@@ -321,7 +331,7 @@ impl<P: Platform> NfcReader<P> {
     /// overshoots the round timer, nor its last 5 ms. A field-off step polls
     /// no other timer of the deactivation. The other RFAL timers still
     /// running (guard time, collision resolution, and the transceive timers
-    /// of an exchange a field-off ended) belong to work that is over: an
+    /// of an exchange the field-off ended) belong to work that is over: an
     /// early expiry at most ends that work sooner, and RFAL restarts each
     /// timer before new work uses it.
     fn skip_rest_of_round(&mut self) {
@@ -336,7 +346,7 @@ impl<P: Platform> NfcReader<P> {
 
     /// [`idle_impl`](Self::idle_impl) from a `Drop`: blocking, errors logged.
     pub(crate) fn idle_on_drop(&mut self) {
-        if let Err(error) = run_blocking(self.idle_impl::<BlockingWait>()) {
+        if let Err(error) = run_blocking(self.idle_impl::<BlockingWait>(false)) {
             warn!("turning the field off failed: {}", error);
         }
     }
@@ -382,7 +392,7 @@ impl<P: Platform> NfcReader<P> {
             Err(error) => {
                 // Timeout or failure: field off and idle, without blocking the
                 // executor; still guarded against cancellation meanwhile.
-                if let Err(idle_error) = discovery.reader().idle_impl::<M>().await {
+                if let Err(idle_error) = discovery.reader().idle_impl::<M>(false).await {
                     debug!("idling after discovery failed: {}", idle_error);
                 }
                 discovery.finish();
@@ -412,8 +422,10 @@ fn keep_first(first: &mut Option<Error>, result: Result<(), Error>) {
 ///   boundary until it ends, DSL / RLS end inside the step, and the field
 ///   goes off in the same call that sees them end).
 ///
-/// The converse need not hold: a missed field-off phase only means the
-/// round is not skipped.
+/// The converse need not hold (a transceive the field-off ended stays
+/// pending in RFAL's low-level state; `idle_impl` knows that case from
+/// `field_already_off`): a missed field-off phase only means the round is not
+/// skipped.
 ///
 /// # Safety
 /// Inside the session of the claim holder, in a deactivation.
@@ -488,7 +500,7 @@ async fn discover_loop<M: WaitMode, P: Platform>(
     let mut elapsed_ms: u64 = 0;
 
     // `rfalNfcDiscover` is only accepted in IDLE (rfal_nfc.c:180).
-    reader.idle_impl::<M>().await?;
+    reader.idle_impl::<M>(false).await?;
     // SAFETY: inside the session of the claim holder; RFAL copies `params`
     // (`gNfcDev.disc = *disParams`), so nothing points at it afterwards.
     reader.call(|| unsafe { ffi::rfalNfcDiscover(params) })?;

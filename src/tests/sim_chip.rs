@@ -48,12 +48,19 @@
 //!   `TRANSMIT_WITH_CRC` / `TRANSMIT_WITHOUT_CRC` (the first
 //!   `NUM_TX_BYTES` bits of the FIFO): the frame is consumed from the FIFO,
 //!   TXE is raised and the frame goes to the tag, if the field is on and the
-//!   chip is an NFC-A poller (`MODE.om = ISO14443A`, `targ = 0`). The answer
+//!   chip is an NFC-A poller (`MODE.om = ISO14443A`, `targ = 0`). Frames
+//!   sent with the field on are logged ([`Chip::rf_log`]); without the field
+//!   nothing goes on air and they are only counted. The answer
 //!   is put into the FIFO, CRC_A appended when the tag sends one, with RXS +
 //!   RXE. Unless `AUX.no_crc_rx` is set the chip checks the CRC and also
 //!   raises CRC on a bad, missing or partial-byte frame (that is how a 4-bit
 //!   T2T ACK reaches `rfalErrorHandling`). Nobody answers: NRE, if the
 //!   no-response timer (0x10/0x11) is non-zero.
+//! - [`Chip::mute`]: frames reach nobody and no NRE is raised (neither after
+//!   a transmit nor for `START_NO_RESPONSE_TIMER`), so an exchange stays open
+//!   until RFAL's own sanity timer (1 s + FWT) ends it. It stands in for a
+//!   card that keeps the reader waiting (S(WTX) chains, a slow card) without
+//!   simulating response times.
 //!
 //! # Tag
 //!
@@ -613,13 +620,19 @@ pub(crate) struct Chip {
     pub tag: Option<NfcATag>,
     /// The next tag response gets a wrong CRC (the chip raises CRC).
     pub corrupt_next_crc: bool,
+    /// Frames reach nobody and the no-response timer never fires (no NRE):
+    /// see the module docs.
+    pub mute: bool,
     /// Every SPI frame, as sent on MOSI.
     pub frames: Vec<Vec<u8>>,
     /// SPI transactions with more than one operation (must stay 0: RFAL is
     /// built with `ST25R_COM_SINGLETXRX`). Only the embedded-hal mocks count.
     pub multi_op_transactions: usize,
-    /// Every RF frame and its answer.
+    /// Every RF frame and its answer: transmit commands with the field on.
     pub rf_log: Vec<RfExchange>,
+    /// Transmit commands with the field off: nothing goes on air (TXE is
+    /// still raised), so they are not in `rf_log`.
+    pub transmits_without_field: usize,
     /// How often the field went from on to off.
     pub field_off_events: usize,
     /// How often the field went from off to on.
@@ -668,9 +681,11 @@ impl Default for Chip {
             ic_identity: IC_IDENTITY_THIS_BUILD,
             tag: None,
             corrupt_next_crc: false,
+            mute: false,
             frames: Vec::new(),
             multi_op_transactions: 0,
             rf_log: Vec::new(),
+            transmits_without_field: 0,
             field_off_events: 0,
             field_on_events: 0,
             last_field_off_ms: None,
@@ -856,8 +871,11 @@ impl Chip {
         self.fifo_lb = 0;
     }
 
+    /// The no-response timer is set and will fire (never while [`mute`](Self::mute)).
     fn nrt_enabled(&self) -> bool {
-        self.regs_a[reg::NO_RESPONSE_TIMER1] != 0 || self.regs_a[reg::NO_RESPONSE_TIMER2] != 0
+        !self.mute
+            && (self.regs_a[reg::NO_RESPONSE_TIMER1] != 0
+                || self.regs_a[reg::NO_RESPONSE_TIMER2] != 0)
     }
 
     fn nfca_poller(&self) -> bool {
@@ -927,7 +945,8 @@ impl Chip {
     fn transmit(&mut self, tx: TxFrame) {
         self.clear_fifo();
         self.irq |= irq::TXE;
-        let rx = if self.field_on() && self.nfca_poller() {
+        let on_air = self.field_on();
+        let rx = if on_air && self.nfca_poller() && !self.mute {
             self.tag.as_mut().and_then(|t| t.on_frame(&tx))
         } else {
             None
@@ -937,7 +956,11 @@ impl Chip {
             None if self.nrt_enabled() => self.irq |= irq::NRE,
             None => {}
         }
-        self.rf_log.push(RfExchange { tx, rx });
+        if on_air {
+            self.rf_log.push(RfExchange { tx, rx });
+        } else {
+            self.transmits_without_field += 1;
+        }
     }
 
     fn receive(&mut self, r: &Response) {
@@ -1473,6 +1496,28 @@ mod unit {
     }
 
     #[test]
+    fn a_mute_chip_neither_answers_nor_raises_nre() {
+        let mut chip = Chip::with_tag(NfcATag::t2t(&[1, 2, 3, 4]));
+        nfca_poller(&mut chip);
+        chip.mute = true;
+        let (irqs, n, ..) = short_frame(&mut chip, cmd::TRANSMIT_REQA);
+        assert_eq!(irqs & (irq::TXE | irq::NRE | irq::RXS), irq::TXE);
+        assert_eq!(n, 0);
+        command(&mut chip, cmd::START_NO_RESPONSE_TIMER);
+        assert_eq!(chip.irq & irq::NRE, 0);
+        assert_eq!(
+            chip.tag.as_ref().unwrap().state,
+            TagState::Idle,
+            "nothing reached the tag"
+        );
+        // Back to normal: the tag answers again.
+        chip.mute = false;
+        let (irqs, n, ..) = short_frame(&mut chip, cmd::TRANSMIT_REQA);
+        assert_eq!(irqs & irq::RXE, irq::RXE);
+        assert_eq!(n, 2);
+    }
+
+    #[test]
     fn tag_ignores_non_nfca_modes_and_field_off() {
         let mut chip = Chip::with_tag(NfcATag::t2t(&[1, 2, 3, 4]));
         nfca_poller(&mut chip);
@@ -1481,8 +1526,15 @@ mod unit {
         assert_eq!(irqs & irq::NRE, irq::NRE);
         write(&mut chip, reg::MODE as u8, &[reg::MODE_OM_ISO14443A]);
         write(&mut chip, reg::OP_CONTROL as u8, &[0]); // field off
+        let logged = chip.rf_log.len();
         let (irqs, ..) = short_frame(&mut chip, cmd::TRANSMIT_REQA);
-        assert_eq!(irqs & irq::NRE, irq::NRE);
+        assert_eq!(irqs & (irq::TXE | irq::NRE), irq::TXE | irq::NRE);
+        assert_eq!(
+            chip.rf_log.len(),
+            logged,
+            "nothing on air without the field"
+        );
+        assert_eq!(chip.transmits_without_field, 1);
     }
 
     /// Full activation of a tag at the chip level, as RFAL does it in NFC

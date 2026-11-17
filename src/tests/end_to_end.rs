@@ -759,6 +759,68 @@ fn field_stays_off_for_t_field_off_after_a_device_outlived_the_round() {
     }
 }
 
+/// A cancelled exchange with a card that keeps the reader waiting (the mute
+/// chip: no answer and no NRE, so only RFAL's 1 s + FWT sanity timer would
+/// end it; a real card can stretch an ISO-DEP exchange to minutes with
+/// S(WTX), and in card emulation nothing bounds it). Dropping or
+/// deactivating the device aborts it: the field goes off at once (so no
+/// S(DESELECT) is sent), the flow returns within milliseconds, and RFAL is
+/// idle and usable again.
+#[test]
+fn deactivation_aborts_an_abandoned_exchange() {
+    let _guard = rfal_test_lock();
+    for end in End::ALL {
+        for (tag, frame) in tags() {
+            let board = board(Some(tag));
+            let mut r = reader(&board);
+            let mut dev = discover(&mut r, &board, &config());
+            board.lock().mute = true;
+            {
+                let mut fut = pin!(dev.transceive(&frame));
+                assert!(
+                    fut.as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending(),
+                    "the exchange is under way"
+                );
+            }
+            let (stopped_at, sent, blocking_waits) = {
+                let chip = board.lock();
+                assert!(chip.field_on());
+                (chip.now_ms, chip.rf_log.len(), chip.waits_blocking)
+            };
+
+            end.run(dev);
+            {
+                let chip = board.lock();
+                assert!(!chip.field_on(), "{end:?}: the field is off");
+                let off_at = chip.last_field_off_ms.expect("the field went off");
+                assert_field_off_promptly(stopped_at, off_at, chip.now_ms);
+                assert!(
+                    chip.rf_log[sent..].is_empty(),
+                    "{end:?}: nothing sent after the abort (no S(DESELECT)): {:02x?}",
+                    chip.rf_log[sent..]
+                        .iter()
+                        .map(|x| &x.tx.data)
+                        .collect::<Vec<_>>()
+                );
+                if matches!(end, End::Async) {
+                    assert_eq!(chip.waits_blocking, blocking_waits, "async never blocks");
+                }
+            }
+            assert_eq!(rfal_state(&mut r), ffi::rfalNfcState_RFAL_NFC_STATE_IDLE);
+
+            board.lock().mute = false;
+            let mut dev = discover(&mut r, &board, &config());
+            dev.blocking_transceive(&frame)
+                .expect("RFAL works normally after the abort");
+            drop(dev);
+            drop(r);
+            finish(&board);
+        }
+    }
+}
+
 #[test]
 fn dropping_the_device_turns_the_field_off() {
     let _guard = rfal_test_lock();
@@ -1146,6 +1208,76 @@ fn cancelled_apdu_keeps_iso_dep_block_numbers_in_sync() {
     drop(dev);
     drop(r);
     finish(&board);
+}
+
+/// The next `transceive` finishes an abandoned exchange, but waits at most
+/// 1 s for it: then it fails with `Busy` without sending its own frame, and
+/// the abandoned exchange stays pending (here until the device is dropped,
+/// which aborts it).
+#[test]
+fn transceive_gives_up_on_an_abandoned_exchange_after_1_s() {
+    let _guard = rfal_test_lock();
+    for blocking in [true, false] {
+        let board = board(Some(echo_t4t(&UID4)));
+        let mut r = reader(&board);
+        let mut dev = discover(&mut r, &board, &config());
+        board.lock().mute = true;
+        {
+            let mut fut = pin!(dev.transceive(&SELECT_NDEF));
+            assert!(
+                fut.as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+        }
+        let (start, sent) = {
+            let chip = board.lock();
+            (chip.now_ms, chip.rf_log.len())
+        };
+        let next = [0x00, 0xB0, 0x00, 0x00, 0x01];
+        let res = if blocking {
+            dev.blocking_transceive(&next).map(<[u8]>::to_vec)
+        } else {
+            poll_by_hand(dev.transceive(&next)).0.map(<[u8]>::to_vec)
+        };
+        assert_eq!(
+            res,
+            Err(Error::Rfal(RfalError::Busy)),
+            "blocking: {blocking}"
+        );
+        {
+            let chip = board.lock();
+            let waited = chip.now_ms.wrapping_sub(start);
+            assert!(
+                (1000..1100).contains(&waited),
+                "Busy after {waited} ms, expected 1 s"
+            );
+            // The drain went on with the abandoned exchange (its I-block went
+            // out), but the new APDU was not sent.
+            assert!(
+                !chip.rf_log[sent..]
+                    .iter()
+                    .any(|x| x.tx.data.ends_with(&next)),
+                "the new APDU was not sent"
+            );
+        }
+        let sent = board.lock().rf_log.len();
+
+        // Still pending: dropping the device aborts it (field off at once,
+        // nothing sent), instead of trying an S(DESELECT) the card would
+        // not answer either.
+        let stopped_at = board.lock().now_ms;
+        drop(dev);
+        {
+            let chip = board.lock();
+            assert!(!chip.field_on());
+            let off_at = chip.last_field_off_ms.expect("the field went off");
+            assert_field_off_promptly(stopped_at, off_at, chip.now_ms);
+            assert_eq!(chip.rf_log.len(), sent, "nothing sent after the abort");
+        }
+        drop(r);
+        finish(&board);
+    }
 }
 
 // ---------------------------------------------------------------------------

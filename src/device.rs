@@ -34,9 +34,22 @@
 //!   in `ACTIVATED` it unconditionally switches to `DATAEXCHANGE`
 //!   (`rfal_nfc.c:792-796`, meant for listen mode). So `in_flight` is set
 //!   only when `rfalNfcDataExchangeStart` returned success, and cleared when
-//!   the status leaves `Busy`; an abandoned exchange is drained before the
-//!   next exchange or the deactivation. RFAL's software sanity timer
-//!   (`rfal_rfst25r3916.c:1931`, FWT + 1 s) bounds every exchange.
+//!   the status leaves `Busy` or the exchange is aborted.
+//! - **An abandoned exchange can run for a long time.** RFAL's software
+//!   sanity timer (`rfal_rfst25r3916.c:1931`, FWT + 1 s) bounds one
+//!   poll-mode frame, but ISO-DEP accepts 20 S(WTX) extensions of up to
+//!   about 5 s each (`RFAL_ISODEP_MAX_WTX_RETRYS`, `rfal_isoDep.h:166`), and
+//!   in listen mode ISO-DEP waits with `RFAL_FWT_NONE`, without any timer
+//!   (`rfal_isoDep.c:549`). So the next exchange drains it for at most
+//!   [`DRAIN_LIMIT_MS`] (then `Busy`), and the deactivation aborts it:
+//!   `rfalFieldOff` ends the transceive (timers and registers,
+//!   `rfal_rfst25r3916.c:1316-1322`) and the device loses power. RFAL's NFC
+//!   layer still counts the exchange as running until `idle_impl` moves it
+//!   to its deactivation, which with the field off cannot send DESELECT /
+//!   DSL / RLS (`rfalStartTransceive` refuses, `rfal_rfst25r3916.c:1356-1359`)
+//!   and goes straight to the field-off wait. RFAL's low-level TX/RX state
+//!   machine stays mid-way until RFAL starts its next transceive; stepping
+//!   it with the field off radiates nothing.
 //! - **The device record** (`Device::raw`) is an entry of `gNfcDev.devList`,
 //!   which RFAL rewrites only during discovery or deactivation
 //!   (`rfal_nfc.c:379`, `2341`), never while a `Device` borrows the reader.
@@ -60,6 +73,10 @@ const DEFAULT_RF_FWT: u32 = 20 * FC_PER_MS;
 /// `(uint16_t)(1000 + FWT in ms)` (`rfal_rfst25r3916.c:430`), so FWT stays
 /// below 65 535 − 1000 ms.
 const MAX_RF_FWT: u32 = (u16::MAX as u32 - 1000) * FC_PER_MS;
+
+/// How long the next exchange waits for an abandoned one to finish before
+/// it gives up with `Busy` (see [`Device::transceive`]).
+const DRAIN_LIMIT_MS: u32 = 1000;
 
 /// A pointer into RFAL's static memory (its device record or receive buffer).
 ///
@@ -123,10 +140,11 @@ struct RxBuf {
 /// turns the field off and returns RFAL to idle, blocking for about 10 ms:
 /// the DESELECT wait (`ISODEP_FWT_DEACTIVATION` ≈ 5.3 ms) plus the minimum
 /// field-off time (tFIELD_OFF, 5 ms). The waits go through
-/// [`Platform::wait_irq_blocking`], which may sleep. An abandoned exchange (a
-/// dropped `transceive` future) is finished first, which can add up to its
-/// frame wait time. Errors are logged. Async code that must never block calls
-/// [`deactivate`](Self::deactivate) instead.
+/// [`Platform::wait_irq_blocking`], which may sleep. An exchange abandoned by
+/// a dropped `transceive` future is aborted, not finished: the field goes off
+/// at once, so the device loses power and gets no DESELECT / RLS, and the
+/// 5 ms of field off follow. Errors are logged. Async code that must never
+/// block calls [`deactivate`](Self::deactivate) instead.
 pub struct Device<'r, P: Platform> {
     reader: &'r mut NfcReader<P>,
     info: DeviceInfo,
@@ -137,8 +155,12 @@ pub struct Device<'r, P: Platform> {
     /// FWT for RF-interface exchanges, in RFAL's 1/fc units.
     rf_fwt: u32,
     /// An exchange was started and has not been seen to finish (its
-    /// `transceive` future was dropped, or the platform failed meanwhile).
+    /// `transceive` future was dropped, the platform failed meanwhile, or
+    /// draining it hit [`DRAIN_LIMIT_MS`]).
     in_flight: bool,
+    /// The field was turned off to abort an exchange (`abort`); the
+    /// deactivation still has to run.
+    field_off: bool,
     /// Bits of the last response `transceive` returned (0 if none).
     last_rx_bits: usize,
     /// Not deactivated yet: `Drop` still has to.
@@ -154,6 +176,7 @@ impl<'r, P: Platform> Device<'r, P> {
             interface: active.interface,
             rf_fwt: DEFAULT_RF_FWT,
             in_flight: false,
+            field_off: false,
             last_rx_bits: 0,
             active: true,
         }
@@ -187,13 +210,23 @@ impl<'r, P: Platform> Device<'r, P> {
     /// # Errors
     ///
     /// [`Error::Rfal`] (e.g. `Param` if `tx` is too long, `Timeout` if the
-    /// device does not answer), [`Error::Platform`].
+    /// device does not answer, [`RfalError::Busy`] if an abandoned exchange is
+    /// still running, see below), [`Error::Platform`].
     ///
     /// # Cancel safety
     ///
-    /// If the future is dropped, the next `transceive` or `deactivate` first
-    /// finishes the abandoned exchange (keeping ISO-DEP block numbers in
-    /// sync). Its response is discarded.
+    /// If the future is dropped mid-exchange, RFAL carries on with that
+    /// exchange. The next `transceive` first finishes it (keeping ISO-DEP
+    /// block numbers in sync) and discards its response, but waits at most
+    /// 1 s for it: if it is still running then, that call fails with
+    /// [`RfalError::Busy`] without sending `tx`, and the next call waits
+    /// again. An exchange can run that long: in poll mode up to RFAL's
+    /// sanity timeout (1 s plus the frame wait time) per frame, which an
+    /// ISO-DEP card can renew 20 times with S(WTX) requests (up to about 5 s
+    /// each); as the listener ([`Tech::RemotePoller`](crate::Tech::RemotePoller))
+    /// it waits for the remote reader without a timeout.
+    /// [`deactivate`](Self::deactivate) and `Drop` do not wait for it: they
+    /// abort it by turning the field off.
     pub async fn transceive(&mut self, tx: &[u8]) -> Result<&[u8], Error> {
         self.transceive_impl::<AsyncWait>(tx).await
     }
@@ -228,7 +261,9 @@ impl<'r, P: Platform> Device<'r, P> {
     }
 
     /// Deactivate the device: DESELECT/RLS if applicable, field off, RFAL
-    /// idle.
+    /// idle. An exchange abandoned by a dropped `transceive` future is
+    /// aborted first by turning the field off, which also skips DESELECT /
+    /// RLS (see the type docs).
     ///
     /// Never blocks the executor: it lets RFAL's worker perform the
     /// deactivation step by step (DESELECT, field off for tFIELD_OFF), then
@@ -256,10 +291,10 @@ impl<'r, P: Platform> Device<'r, P> {
     // --- flows ---------------------------------------------------------------
 
     async fn transceive_impl<M: WaitMode>(&mut self, tx: &[u8]) -> Result<&[u8], Error> {
-        self.drain::<M>().await?;
         self.last_rx_bits = 0;
+        self.drain::<M>().await?;
         let rx = self.start(tx)?;
-        let status = self.complete::<M>().await?;
+        let status = self.complete::<M>(None).await?;
         // RF frames ending in a partial byte (e.g. a 4-bit T2T ACK/NAK) are
         // responses, not errors. RFAL only ever reports the plain code with
         // the bit count in `*rvdLen`, but accept the whole
@@ -355,9 +390,15 @@ impl<'r, P: Platform> Device<'r, P> {
         unsafe { core::slice::from_raw_parts(data, len) }
     }
 
-    /// Step RFAL until the running exchange is no longer busy. Returns RFAL's
-    /// status code of the exchange; `Err` only if the platform failed.
-    async fn complete<M: WaitMode>(&mut self) -> Result<ffi::ReturnCode, Error> {
+    /// Step RFAL until the running exchange is no longer busy or, with
+    /// `limit_ms`, until that long has passed. Returns RFAL's status code of
+    /// the exchange, `RFAL_ERR_BUSY` if the limit came first (the exchange
+    /// then stays in flight); `Err` only if the platform failed.
+    async fn complete<M: WaitMode>(
+        &mut self,
+        limit_ms: Option<u32>,
+    ) -> Result<ffi::ReturnCode, Error> {
+        let start = self.reader.platform_mut().now_ms();
         loop {
             // SAFETY: inside the session of the claim holder, with an exchange
             // started (`in_flight`), as `rfalNfcDataExchangeGetStatus` needs.
@@ -373,25 +414,67 @@ impl<'r, P: Platform> Device<'r, P> {
             if !busy {
                 return Ok(status);
             }
-            self.reader.idle_wait::<M>(None).await;
+            let cap = match limit_ms {
+                None => None,
+                Some(limit) => {
+                    let elapsed = self.reader.platform_mut().now_ms().wrapping_sub(start);
+                    if elapsed >= limit {
+                        return Ok(status);
+                    }
+                    Some(limit - elapsed)
+                }
+            };
+            self.reader.idle_wait::<M>(cap).await;
         }
     }
 
-    /// Finish an exchange whose `transceive` future was dropped; its result
-    /// is discarded (only a platform failure is returned).
+    /// Finish an exchange whose `transceive` future was dropped, waiting at
+    /// most [`DRAIN_LIMIT_MS`]; its result is discarded. `Busy` if it is
+    /// still running then (it stays in flight), else only a platform failure
+    /// is returned.
+    ///
+    /// Draining, not aborting: the device stays active, and turning the
+    /// field off would reset it. The limit keeps an exchange that runs for
+    /// minutes (S(WTX)) or forever (listen mode) from holding up the call;
+    /// the caller retries, or deactivates the device, which aborts it.
     async fn drain<M: WaitMode>(&mut self) -> Result<(), Error> {
         if !self.in_flight {
             return Ok(());
         }
         debug!("finishing an abandoned exchange");
-        self.complete::<M>().await.map(drop)
+        if self.complete::<M>(Some(DRAIN_LIMIT_MS)).await? == ffi::RFAL_ERR_BUSY {
+            debug!("the abandoned exchange is still running");
+            return Err(RfalError::Busy.into());
+        }
+        Ok(())
+    }
+
+    /// Before the deactivation: abort an exchange whose `transceive` future
+    /// was dropped (see the module docs) by turning the field off, instead
+    /// of waiting for it. Sets `field_off` unless the platform failed.
+    ///
+    /// No RFAL step first, not even to collect an exchange that may have
+    /// ended meanwhile: a step can put the next frame of the exchange on
+    /// air (ISO-DEP queues each frame in one step and sends it in the next).
+    fn abort(&mut self) -> Result<(), Error> {
+        if !self.in_flight {
+            return Ok(());
+        }
+        debug!("aborting an abandoned exchange: field off");
+        // SAFETY: inside the session of the claim holder; RFAL is
+        // initialised, all `rfalFieldOff` needs. It ends RFAL's transceive
+        // and touches nothing the deactivation relies on (module docs).
+        let (_, off) = self.reader.enter_both(|| unsafe { ffi::rfalFieldOff() });
+        self.in_flight = false;
+        self.field_off = off.is_ok();
+        off
     }
 
     async fn deactivate_impl<M: WaitMode>(&mut self) -> Result<(), Error> {
-        let drained = self.drain::<M>().await;
-        let idle = self.reader.idle_impl::<M>().await;
+        let aborted = self.abort();
+        let idle = self.reader.idle_impl::<M>(self.field_off).await;
         self.active = false;
-        drained.and(idle)
+        aborted.and(idle)
     }
 }
 
