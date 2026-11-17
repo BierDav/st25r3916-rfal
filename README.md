@@ -497,7 +497,7 @@ built from source on a pinned nightly. Newer nightlies currently fail on
 RISC-V chips, e.g. `MCU=esp32c6 cargo build --target riscv32imac-esp-espidf`.
 
 Xtensa chips (ESP32, -S2, -S3) need Espressif's Rust fork (at least
-1.99.0.0 for this crate) and its libclang for bindgen:
+1.100.0.0 for this crate) and its libclang for bindgen:
 
 ```sh
 espup install --toolchain-version 1.100.0.0 --targets esp32 --std
@@ -514,9 +514,9 @@ build with your own `Platform`), put the ESP GCC on `PATH` or set
 
 ## Minimum supported Rust version
 
-The MSRV is the latest stable Rust (currently 1.99) and tracks it: it may
+The MSRV is the latest stable Rust (currently 1.100) and tracks it: it may
 be raised in any minor release. On ESP-IDF, Xtensa chips need Espressif's
-`esp` toolchain 1.99.0.0 or newer, and the RISC-V chips build with nightly
+`esp` toolchain 1.100.0.0 or newer, and the RISC-V chips build with nightly
 (see [Building for ESP-IDF](#building-for-esp-idf)).
 
 ## License

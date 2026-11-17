@@ -2,7 +2,7 @@
 name = "st25r3916-rfal"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.99"
+rust-version = "1.100"
 # One RFAL per binary: RFAL keeps its state in C globals, so Cargo must refuse to
 # link two copies into one program. (0.1.0 did not declare `links`, so this only
 # guards against 0.2 together with later versions.)

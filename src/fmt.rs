@@ -24,6 +24,11 @@
 //! - Prefix nothing: the `log`/defmt location already identifies the crate.
 #![allow(unused_macros)]
 
+// With both features on, defmt wins and nothing calls `log`. Mark it used so
+// Cargo's `unused_dependencies` lint (on by default since 1.100) stays quiet.
+#[cfg(all(feature = "log", feature = "defmt"))]
+use log as _;
+
 macro_rules! trace {
     ($s:literal $(, $x:expr)* $(,)?) => {
         cfg_select! {

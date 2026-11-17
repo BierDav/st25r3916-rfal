@@ -34,10 +34,10 @@ a lock, calls on an unstarted reader, and leaks on drop.
   structs were affected too. There is no 0.1 fix. 0.2 builds both sides with
   short enums and checks every RFAL type's size, alignment and field offsets
   at compile time, so such a mismatch now fails the build.
-- **MSRV:** 0.2 needs Rust **1.99** (0.1: 1.88), and the crate is edition
+- **MSRV:** 0.2 needs Rust **1.100** (0.1: 1.88), and the crate is edition
   2024. Your own crate can stay on any edition. The MSRV tracks the latest
   stable Rust and may be raised in minor releases. On Xtensa ESP chips you
-  need Espressif's `esp` toolchain 1.99.0.0 or newer.
+  need Espressif's `esp` toolchain 1.100.0.0 or newer.
 - **One copy per binary:** 0.2 declares `links = "rfal"`, so Cargo refuses
   two copies of the crate that declare it, such as 0.2 next to a later 0.3.
   0.1 does not declare it, so Cargo **cannot** catch a 0.1 + 0.2 mix: it

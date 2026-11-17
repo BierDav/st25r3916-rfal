@@ -9,7 +9,9 @@
 # - nightly-2026-10-16 ICEs on esp-idf-svc 0.53 (`compare_impl_item`:
 #   "DefId::expect_local: embedded_svc::wifi::asynch::Wifi::scan_n::N isn't
 #   local").
-# Move the pin forward once a newer nightly builds `cargo build` here.
+# Still broken with nightly-2026-11-16. This nightly is 1.100.0-nightly, so it
+# meets the crate's rust-version (1.100). Move the pin forward once a newer
+# nightly builds `cargo build` here.
 [toolchain]
 channel = "nightly-2026-09-01"
 components = ["rust-src"]
